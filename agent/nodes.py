@@ -557,7 +557,6 @@ async def summarize_node(state: SalesState) -> dict[str, Any]:
 
     cutoff = max(0, len(messages) - SUMMARIZE_KEEP)
     to_summarize = messages[:cutoff]
-    recent = messages[cutoff:]
 
     # Render plain text das mensagens antigas pra entregar ao summarizer.
     rendered_parts: list[str] = []

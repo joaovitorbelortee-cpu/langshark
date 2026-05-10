@@ -14,9 +14,6 @@ from langgraph.checkpoint.memory import InMemorySaver
 from agent.checkpointer import CheckpointerProvider, thread_id_for
 
 
-pytestmark = pytest.mark.asyncio
-
-
 async def test_inmemory_fallback_when_no_postgres():
     """Sem POSTGRES_URL → InMemorySaver."""
     provider = CheckpointerProvider(postgres_url="")

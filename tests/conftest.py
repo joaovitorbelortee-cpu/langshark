@@ -5,16 +5,21 @@ Roda os testes em ambiente totalmente isolado (sem rede, sem Postgres).
 """
 from __future__ import annotations
 
-import asyncio
-from typing import Any
+import warnings
 
-import pytest
+# Suprime warning at-import da langgraph antes de qualquer import dessa lib.
+warnings.filterwarnings("ignore", message="The default value of .allowed_objects.")
 
-from agent import nodes as nodes_mod
-from agent.tools import EvolutionClient
-from memory.redis_store import RedisStore
-from memory.supabase_tenant import TenantResolver
-from rag.catalog import CatalogRAG
+import asyncio  # noqa: E402
+from typing import Any  # noqa: E402
+
+import pytest  # noqa: E402
+
+from agent import nodes as nodes_mod  # noqa: E402
+from agent.tools import EvolutionClient  # noqa: E402
+from memory.redis_store import RedisStore  # noqa: E402
+from memory.supabase_tenant import TenantResolver  # noqa: E402
+from rag.catalog import CatalogRAG  # noqa: E402
 
 
 # ────────────────────────────────────────────────────────────────────
