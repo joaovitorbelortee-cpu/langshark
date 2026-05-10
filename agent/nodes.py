@@ -66,6 +66,21 @@ def _make_llm(temperature: float = 0.7, max_tokens: int = 1000) -> ChatOpenAI:
     )
 
 
+def _make_llm_with_tools(temperature: float = 0.7, max_tokens: int = 1000) -> Any:
+    """
+    Variante do _make_llm que faz bind_tools(EVOLUTION_TOOLS) — IA pode chamar
+    tools (react, mark_read) autonomamente.
+
+    Opt-in: só usado quando ENABLE_TOOL_CALLS=1. Default = tags ([REACT:X]).
+    """
+    base = _make_llm(temperature=temperature, max_tokens=max_tokens)
+    if not os.getenv("ENABLE_TOOL_CALLS"):
+        return base
+    # Lazy import pra evitar ciclo (evolution_tools → nodes.get_evolution).
+    from agent.evolution_tools import EVOLUTION_TOOLS
+    return base.bind_tools(EVOLUTION_TOOLS)
+
+
 # ────────────────────────────────────────────────────────────────────
 # Prompts
 # ────────────────────────────────────────────────────────────────────
@@ -246,7 +261,7 @@ async def respond_node(state: SalesState) -> dict[str, Any]:
     messages: list[Any] = [SystemMessage(content=system_prompt)]
     messages.extend(state.get("messages", []))
 
-    llm = _make_llm(temperature=0.7, max_tokens=600)
+    llm = _make_llm_with_tools(temperature=0.7, max_tokens=600)
     res = await llm.ainvoke(messages)
     raw = res.content or ""
 
