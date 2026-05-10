@@ -334,6 +334,8 @@ async def persist_node(state: SalesState) -> dict[str, Any]:
             role="user",
             content=state["user_message"],
         )
+        # KillSwitch: marca último turno como "lead" (pra cancelar follow-up agendado)
+        await redis.set_last_from(state["instance_name"], state["phone"], "lead")
     if state.get("reply"):
         await redis.append_message(
             instance=state["instance_name"],
@@ -341,6 +343,7 @@ async def persist_node(state: SalesState) -> dict[str, Any]:
             role="model",
             content=state["reply"],
         )
+        await redis.set_last_from(state["instance_name"], state["phone"], "agent")
     return {}
 
 

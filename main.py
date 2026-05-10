@@ -24,6 +24,7 @@ from fastapi import FastAPI, HTTPException, Request
 
 from agent.checkpointer import CheckpointerProvider, thread_id_for
 from agent.graph import build_graph
+from agent.qstash import QStashClient
 from memory.redis_store import RedisStore
 
 
@@ -57,6 +58,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="bot-vendas", lifespan=lifespan)
 redis = RedisStore()
+qstash = QStashClient()
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -249,14 +251,95 @@ async def webhook(req: Request) -> dict:
     )
     final_state = await _run_graph_streaming(initial_state, thread_id)
 
+    # Agendar follow-up via QStash se a IA pediu E o cliente não converteu.
+    schedule_min = final_state.get("schedule_minutes")
+    has_converted = final_state.get("has_converted", False)
+    qstash_result: dict[str, Any] = {"skipped": True}
+    if schedule_min and not has_converted and qstash.enabled:
+        qstash_result = await qstash.schedule_followup(
+            project_id=final_state.get("project_id") or "padrao",
+            instance=instance,
+            phone=phone,
+            delay_minutes=schedule_min,
+            push_name=push_name,
+        )
+        log.info("[qstash] schedule_followup → %s", qstash_result)
+
     return {
         "ok": True,
         "processed": True,
         "intent": final_state.get("intent"),
-        "has_converted": final_state.get("has_converted", False),
-        "schedule_minutes": final_state.get("schedule_minutes"),
+        "has_converted": has_converted,
+        "schedule_minutes": schedule_min,
         "sent_count": final_state.get("sent_count", 0),
         "flow_dispatched": final_state.get("flow_dispatched", False),
+        "qstash": qstash_result,
+    }
+
+
+# ────────────────────────────────────────────────────────────────────
+# Follow-up trigger (callback agendado pelo QStash)
+# ────────────────────────────────────────────────────────────────────
+
+@app.post("/api/trigger-followup")
+async def trigger_followup(req: Request) -> dict:
+    """
+    Endpoint chamado pelo QStash após N minutos.
+    Body: {project_id, instance_name, phone, push_name}.
+
+    KillSwitch: se o lead respondeu nesse meio-tempo (last_message_from=lead),
+    cancelamos. Caso contrário, roda o grafo com intent="follow_up" injetado.
+    """
+    _check_auth(req)
+    body = await req.json()
+
+    project_id = body.get("project_id") or "padrao"
+    instance = body.get("instance_name") or ""
+    phone = body.get("phone") or ""
+    push_name = body.get("push_name") or ""
+
+    if not instance or not phone:
+        raise HTTPException(status_code=400, detail="instance_name and phone required")
+
+    # KillSwitch — checa última atividade no Redis
+    last_from = await redis._cmd("GET", f"last_from:{instance}:{phone}")
+    if last_from == "lead":
+        log.info("[followup] killswitch %s/%s — lead respondeu", instance, phone)
+        return {"ok": True, "skipped": "killswitch_lead_replied"}
+
+    # Roda o grafo forçando intent=follow_up (pula detect_intent na rota especialista)
+    initial_state = {
+        "project_id": project_id,
+        "instance_name": instance,
+        "phone": phone,
+        "push_name": push_name,
+        "user_message": "",  # follow-up é iniciativa do bot
+        "media_mime": None,
+        "media_base64": None,
+        "message_id": "",
+        "intent": "follow_up",
+        "messages": [],
+    }
+
+    thread_id = thread_id_for(project_id, instance, phone)
+    final_state = await _run_graph_streaming(initial_state, thread_id)
+
+    # Agenda próximo follow-up se a IA pediu (escala exponencial)
+    schedule_min = final_state.get("schedule_minutes")
+    if schedule_min and qstash.enabled:
+        await qstash.schedule_followup(
+            project_id=project_id,
+            instance=instance,
+            phone=phone,
+            delay_minutes=schedule_min,
+            push_name=push_name,
+        )
+
+    return {
+        "ok": True,
+        "triggered": True,
+        "sent_count": final_state.get("sent_count", 0),
+        "next_schedule_min": schedule_min,
     }
 
 
@@ -267,6 +350,7 @@ async def health() -> dict:
         "redis": "remote" if redis.remote_enabled else "local-fallback",
         "evolution": bool(os.getenv("EVOLUTION_API_URL")),
         "checkpointer": _checkpointer_provider.kind if _checkpointer_provider else "uninit",
+        "qstash": qstash.enabled,
     }
 
 

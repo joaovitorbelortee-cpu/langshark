@@ -182,3 +182,14 @@ class RedisStore:
 
     async def set_summary(self, instance: str, phone: str, summary: str) -> None:
         await self._cmd("SET", _convo_summary_key(instance, phone), summary, "EX", str(CHAT_TTL_SECONDS))
+
+    # ────────────────────────────────────────────────────────────
+    # KillSwitch follow-up — marca "lead" vs "agent" do último turno
+    # ────────────────────────────────────────────────────────────
+
+    async def set_last_from(self, instance: str, phone: str, who: str) -> None:
+        """who = 'lead' | 'agent'. Usado pra cancelar follow-up se lead respondeu."""
+        await self._cmd("SET", f"last_from:{instance}:{phone}", who, "EX", str(CHAT_TTL_SECONDS))
+
+    async def get_last_from(self, instance: str, phone: str) -> str:
+        return (await self._cmd("GET", f"last_from:{instance}:{phone}")) or ""
