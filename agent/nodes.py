@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from agent.flows import flows_prompt_block, get_flow, parse_flow_tag
@@ -565,14 +565,16 @@ async def summarize_node(state: SalesState) -> dict[str, Any]:
             summary=new_summary,
         )
 
-    # Replaces messages com as recentes apenas. Como `messages` usa add_messages,
-    # devolvemos uma RemoveMessage-like estratégia: enviamos as recentes diretamente.
-    # add_messages faz upsert por id; aqui retornamos a lista atual completa com
-    # ids preservados — o reducer mantém histórico. Não tem como "trim" via reducer
-    # padrão, então re-criamos o state com `messages` substituído via __replace__.
-    # Solução prática: emitimos uma sinalização e respond/close usam `summary` +
-    # somente últimas N mensagens. Aqui apenas grava o summary e deixa o histórico.
-    return {"summary": new_summary}
+    # Trim REAL no checkpointer: emite RemoveMessage por id para cada mensagem antiga.
+    # add_messages do LangGraph reconhece RemoveMessage e remove do state.
+    # Mensagens sem id (algumas chegam sem) são puladas — o reducer ignora.
+    remove_patches: list[Any] = []
+    for m in to_summarize:
+        msg_id = getattr(m, "id", None)
+        if msg_id:
+            remove_patches.append(RemoveMessage(id=msg_id))
+
+    return {"summary": new_summary, "messages": remove_patches}
 
 
 # ────────────────────────────────────────────────────────────────────
