@@ -22,7 +22,10 @@ from langgraph.graph import END, START, StateGraph
 from agent.nodes import (
     close_sale_node,
     detect_intent_node,
+    follow_up_node,
+    greeting_node,
     load_history_node,
+    objection_node,
     persist_node,
     respond_node,
     retrieve_catalog_node,
@@ -35,6 +38,12 @@ def _route_after_intent(state: SalesState) -> str:
     intent = state.get("intent", "outros")
     if intent == "comprou":
         return "persist"
+    if intent == "saudacao":
+        return "greeting"
+    if intent == "objecao":
+        return "objection"
+    if intent == "follow_up":
+        return "follow_up"
     if intent == "intencao_compra":
         return "close_path"
     return "respond_path"
@@ -58,6 +67,9 @@ def build_graph(checkpointer: Any | None = None):
     g.add_node("retrieve_for_respond", retrieve_catalog_node)
     g.add_node("close_sale", close_sale_node)
     g.add_node("respond", respond_node)
+    g.add_node("greeting", greeting_node)
+    g.add_node("objection", objection_node)
+    g.add_node("follow_up", follow_up_node)
     g.add_node("persist", persist_node)
 
     g.add_edge(START, "load_history")
@@ -73,6 +85,9 @@ def build_graph(checkpointer: Any | None = None):
         _route_after_intent,
         {
             "persist": "persist",
+            "greeting": "greeting",
+            "objection": "objection",
+            "follow_up": "follow_up",
             "close_path": "retrieve_for_close",
             "respond_path": "retrieve_for_respond",
         },
@@ -83,6 +98,10 @@ def build_graph(checkpointer: Any | None = None):
 
     g.add_edge("retrieve_for_respond", "respond")
     g.add_edge("respond", "persist")
+
+    g.add_edge("greeting", "persist")
+    g.add_edge("objection", "persist")
+    g.add_edge("follow_up", "persist")
 
     g.add_edge("persist", END)
 

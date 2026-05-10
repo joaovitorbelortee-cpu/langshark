@@ -327,3 +327,102 @@ async def vision_node(state: SalesState) -> dict[str, Any]:
     while history and isinstance(history[-1], HumanMessage):
         history.pop()
     return {"messages": [*history, multimodal_user]}
+
+
+# ────────────────────────────────────────────────────────────────────
+# Especialistas por intenção (cada um com prompt próprio)
+# ────────────────────────────────────────────────────────────────────
+
+GREETING_SYSTEM = """Você é um VENDEDOR HUMANO recebendo um cliente novo no WhatsApp.
+Seu único objetivo neste turno: ser caloroso, criar conexão e descobrir o nome dele.
+
+REGRAS:
+- 1-2 bolhas curtas, ≤320 chars. Informal, brasileiro.
+- Não venda nada ainda. NÃO mencione preço, produto, condição.
+- Pergunte o nome de forma natural: "posso te chamar como?", "qual seu nome?".
+- Se ele já disse o nome em alguma mensagem anterior, USE o nome e pula a pergunta — passa
+  pra qualificação leve ("e me conta, o que te trouxe aqui?").
+- Emojis com moderação. Nunca pareça SAC.
+
+Tags obrigatórias: termine com [AGENDAR: 20] (lead curioso, volta em 20 min se sumir)."""
+
+
+OBJECTION_SYSTEM = """Você é um VENDEDOR especialista em QUEBRA DE OBJEÇÃO. O lead hesitou
+("tá caro", "vou pensar", "depois eu vejo", "não sei se vale a pena").
+
+ROTEIRO (Cialdini + reframing):
+1. VALIDA primeiro: "entendo perfeitamente", "faz sentido", "boa pergunta" — sem ironia.
+2. REFRAME o valor: ancoragem (compare com algo maior), prova social ("tive um cliente que..."),
+   ou ROI ("em 1 mês isso já se paga porque...").
+3. MICRO-COMPROMISSO: convide pra um próximo passo pequeno ("posso te mostrar um caso?",
+   "quer ver como funciona em 2 min?"). Não force fechamento.
+
+REGRAS:
+- Máximo 2 bolhas, ≤320 chars cada.
+- NUNCA prometa o que não pode cumprir.
+- Se a objeção for preço genuíno: tenha empatia e ofereça alternativa real (plano menor,
+  parcelado) — só se existir.
+
+Tags: termine com [AGENDAR: 60] (deu espaço de 1h, ele precisa respirar)."""
+
+
+FOLLOW_UP_SYSTEM = """Você é um VENDEDOR retomando uma conversa antiga. O lead respondeu
+agora depois de um tempo, ou o sistema agendou um follow-up que disparou.
+
+REGRAS:
+- USE o histórico: cite algo da conversa anterior para mostrar continuidade
+  ("E aí, conseguiu pensar naquilo que a gente conversou sobre X?").
+- Não comece do zero. Não pergunte coisas que ele já respondeu.
+- Aplique Efeito Zeigarnik: retome a pergunta aberta que ficou pendente.
+- Se a conversa morreu há muito tempo (sem contexto recente), abra com algo de VALOR
+  (dica, novidade, oferta nova) — reciprocidade.
+- 1-2 bolhas curtas. Informal.
+
+Tags: leia a temperatura.
+- Se ele engajou agora: [AGENDAR: 15].
+- Se respondeu vago: [AGENDAR: 180].
+- Se você está iniciando follow-up sem resposta dele: [AGENDAR: 1440] (24h)."""
+
+
+async def _run_specialist(
+    state: SalesState,
+    system_prompt: str,
+    temperature: float = 0.7,
+    max_tokens: int = 400,
+) -> dict[str, Any]:
+    """Helper compartilhado pelos especialistas — mesma lógica de tags/chunks."""
+    catalog_block = get_rag().format_context(state.get("catalog_hits", []) or [])
+    system = system_prompt + ("\n\n" + catalog_block if catalog_block else "")
+
+    messages: list[Any] = [SystemMessage(content=system)]
+    messages.extend(state.get("messages", []))
+
+    llm = _make_llm(temperature=temperature, max_tokens=max_tokens)
+    res = await llm.ainvoke(messages)
+    parsed = parse_tags(res.content or "")
+    chunks = chunk_for_whatsapp(parsed.text, max_bubbles=2, max_chars=320)
+
+    return {
+        "reply": parsed.text,
+        "chunks": chunks,
+        "has_converted": parsed.has_converted,
+        "schedule_minutes": parsed.schedule_minutes,
+        "react_emoji": parsed.react_emoji,
+        "quote_previous": parsed.quote_previous,
+        "messages": [AIMessage(content=parsed.text)],
+    }
+
+
+async def greeting_node(state: SalesState) -> dict[str, Any]:
+    """Saudação calorosa + descoberta de nome."""
+    return await _run_specialist(state, GREETING_SYSTEM, temperature=0.8, max_tokens=200)
+
+
+async def objection_node(state: SalesState) -> dict[str, Any]:
+    """Quebra de objeção com Cialdini."""
+    return await _run_specialist(state, OBJECTION_SYSTEM, temperature=0.6, max_tokens=350)
+
+
+async def follow_up_node(state: SalesState) -> dict[str, Any]:
+    """Retomada de conversa antiga."""
+    return await _run_specialist(state, FOLLOW_UP_SYSTEM, temperature=0.7, max_tokens=300)
