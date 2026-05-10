@@ -1,16 +1,21 @@
 """
 Construção do grafo LangGraph.
 
-Topologia:
+Topologia (atualizada nas etapas seguintes):
 
     START
       └─> load_history
             └─> detect_intent
-                  ├─[comprou]──────────────> persist ─> END  (silencia follow-up)
+                  ├─[comprou]──────────────> persist ─> END
                   ├─[intencao_compra]─────> retrieve_catalog ─> close_sale ─> persist ─> END
                   └─[outros]──────────────> retrieve_catalog ─> respond     ─> persist ─> END
+
+Compila com checkpointer opcional (Postgres ou in-memory) — passe `checkpointer`
+em build_graph() pra ativar persistência durável de state entre invocações.
 """
 from __future__ import annotations
+
+from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 
@@ -34,7 +39,7 @@ def _route_after_intent(state: SalesState) -> str:
     return "respond_path"
 
 
-def build_graph():
+def build_graph(checkpointer: Any | None = None):
     """Compila o grafo. Retorna um Runnable pronto pra ainvoke."""
     g: StateGraph = StateGraph(SalesState)
 
@@ -67,15 +72,17 @@ def build_graph():
 
     g.add_edge("persist", END)
 
+    if checkpointer is not None:
+        return g.compile(checkpointer=checkpointer)
     return g.compile()
 
 
-_graph = None
+_graph: Any | None = None
 
 
-def get_graph():
-    """Singleton — compila uma vez por processo."""
+def get_graph(checkpointer: Any | None = None):
+    """Singleton — compila uma vez por processo (opcionalmente com checkpointer)."""
     global _graph
     if _graph is None:
-        _graph = build_graph()
+        _graph = build_graph(checkpointer=checkpointer)
     return _graph
