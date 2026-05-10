@@ -59,3 +59,17 @@ class SalesState(TypedDict, total=False):
     schedule_minutes: int | None     # tag [AGENDAR:N] detectada
     react_emoji: str | None          # tag [REACT:X] detectada
     quote_previous: bool             # tag [QUOTE] detectada
+
+    # Memória longa (preenchida por summarize_node quando histórico cresce)
+    summary: str                     # resumo das mensagens antigas
+
+    # Fluxo pré-cadastrado detectado pela IA (tag [FLOW: nome])
+    flow_name: str | None            # nome do fluxo a executar
+    flow_dispatched: bool            # send foi feito via flow_executor_node
+
+    # Tracing (preenchido pelo main durante streaming)
+    message_id: str                  # id Evolution da mensagem do cliente
+
+    # Resultado do envio (preenchido por send_node)
+    sent: bool                       # se chunks foram entregues
+    sent_count: int                  # quantas bolhas saíram com sucesso

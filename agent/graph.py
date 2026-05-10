@@ -29,6 +29,7 @@ from agent.nodes import (
     persist_node,
     respond_node,
     retrieve_catalog_node,
+    summarize_node,
     vision_node,
 )
 from agent.state import SalesState
@@ -61,6 +62,7 @@ def build_graph(checkpointer: Any | None = None):
     g: StateGraph = StateGraph(SalesState)
 
     g.add_node("load_history", load_history_node)
+    g.add_node("summarize", summarize_node)
     g.add_node("vision", vision_node)
     g.add_node("detect_intent", detect_intent_node)
     g.add_node("retrieve_for_close", retrieve_catalog_node)
@@ -73,8 +75,9 @@ def build_graph(checkpointer: Any | None = None):
     g.add_node("persist", persist_node)
 
     g.add_edge(START, "load_history")
+    g.add_edge("load_history", "summarize")
     g.add_conditional_edges(
-        "load_history",
+        "summarize",
         _route_after_history,
         {"vision_path": "vision", "intent_path": "detect_intent"},
     )

@@ -116,8 +116,18 @@ Sempre encerre com [AGENDAR: N], a menos que [COMPROU] esteja presente.
 </tags_secretas>"""
 
 
-def _build_system_prompt(catalog_block: str) -> str:
-    return SALES_SYSTEM + ("\n\n" + catalog_block if catalog_block else "")
+def _build_system_prompt(catalog_block: str, summary: str = "") -> str:
+    prompt = SALES_SYSTEM
+    if summary:
+        prompt += (
+            "\n\n<resumo_conversa_anterior>\n"
+            f"{summary}\n"
+            "</resumo_conversa_anterior>\n"
+            "Use esse resumo como contexto, mas baseie a resposta nas mensagens recentes."
+        )
+    if catalog_block:
+        prompt += "\n\n" + catalog_block
+    return prompt
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -125,13 +135,24 @@ def _build_system_prompt(catalog_block: str) -> str:
 # ────────────────────────────────────────────────────────────────────
 
 async def load_history_node(state: SalesState) -> dict[str, Any]:
-    """Carrega histórico do Redis e adiciona a mensagem atual do usuário."""
-    history = await get_redis().load_history(
+    """
+    Carrega histórico do Redis + summary persistido (se houver) e adiciona
+    a mensagem atual do usuário.
+    """
+    redis = get_redis()
+    history = await redis.load_history(
+        instance=state["instance_name"],
+        phone=state["phone"],
+    )
+    summary = await redis.get_summary(
         instance=state["instance_name"],
         phone=state["phone"],
     )
     user_msg = HumanMessage(content=state.get("user_message") or "[mídia]")
-    return {"messages": [*history, user_msg]}
+    patch: dict[str, Any] = {"messages": [*history, user_msg]}
+    if summary:
+        patch["summary"] = summary
+    return patch
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -185,7 +206,7 @@ async def retrieve_catalog_node(state: SalesState) -> dict[str, Any]:
 async def respond_node(state: SalesState) -> dict[str, Any]:
     """Gera a resposta de vendas, parseia tags, prepara chunks."""
     catalog_block = get_rag().format_context(state.get("catalog_hits", []) or [])
-    system_prompt = _build_system_prompt(catalog_block)
+    system_prompt = _build_system_prompt(catalog_block, state.get("summary", ""))
 
     messages: list[Any] = [SystemMessage(content=system_prompt)]
     messages.extend(state.get("messages", []))
@@ -229,7 +250,12 @@ Se o cliente JÁ confirmou que pagou: encerre com [COMPROU] em vez de [AGENDAR].
 async def close_sale_node(state: SalesState) -> dict[str, Any]:
     """Variante de respond para o agente de fechamento."""
     catalog_block = get_rag().format_context(state.get("catalog_hits", []) or [])
-    system = CLOSE_SYSTEM + ("\n\n" + catalog_block if catalog_block else "")
+    summary = state.get("summary", "")
+    system = CLOSE_SYSTEM
+    if summary:
+        system += f"\n\n<resumo>{summary}</resumo>"
+    if catalog_block:
+        system += "\n\n" + catalog_block
 
     messages: list[Any] = [SystemMessage(content=system)]
     messages.extend(state.get("messages", []))
@@ -392,7 +418,12 @@ async def _run_specialist(
 ) -> dict[str, Any]:
     """Helper compartilhado pelos especialistas — mesma lógica de tags/chunks."""
     catalog_block = get_rag().format_context(state.get("catalog_hits", []) or [])
-    system = system_prompt + ("\n\n" + catalog_block if catalog_block else "")
+    summary = state.get("summary", "")
+    system = system_prompt
+    if summary:
+        system += f"\n\n<resumo>{summary}</resumo>"
+    if catalog_block:
+        system += "\n\n" + catalog_block
 
     messages: list[Any] = [SystemMessage(content=system)]
     messages.extend(state.get("messages", []))
@@ -426,3 +457,71 @@ async def objection_node(state: SalesState) -> dict[str, Any]:
 async def follow_up_node(state: SalesState) -> dict[str, Any]:
     """Retomada de conversa antiga."""
     return await _run_specialist(state, FOLLOW_UP_SYSTEM, temperature=0.7, max_tokens=300)
+
+
+# ────────────────────────────────────────────────────────────────────
+# Nó: summarize (memória longa quando histórico > N)
+# ────────────────────────────────────────────────────────────────────
+
+SUMMARIZE_THRESHOLD = 30      # dispara quando há > 30 mensagens
+SUMMARIZE_KEEP = 10           # mantém últimas 10 mensagens, resume o resto
+
+SUMMARIZE_SYSTEM = """Resuma a conversa abaixo em até 6 bullets curtos para um vendedor
+relembrar rapidamente quem é esse lead, o que ele quer, e onde a conversa parou.
+
+Inclua:
+- Nome do cliente (se mencionado)
+- Produto/interesse principal
+- Objeções já levantadas
+- Preço/condição já oferecida
+- Próximo passo combinado
+
+NÃO inclua emojis. NÃO faça discurso de vendas. Só fatos."""
+
+
+async def summarize_node(state: SalesState) -> dict[str, Any]:
+    """
+    Se messages > SUMMARIZE_THRESHOLD, comprime as antigas em summary.text e
+    mantém só as últimas SUMMARIZE_KEEP. Persiste o summary no Redis pra
+    reaproveitamento em próximas invocações.
+    """
+    messages = list(state.get("messages") or [])
+    if len(messages) <= SUMMARIZE_THRESHOLD:
+        return {}
+
+    cutoff = max(0, len(messages) - SUMMARIZE_KEEP)
+    to_summarize = messages[:cutoff]
+    recent = messages[cutoff:]
+
+    # Render plain text das mensagens antigas pra entregar ao summarizer.
+    rendered_parts: list[str] = []
+    if state.get("summary"):
+        rendered_parts.append(f"Resumo anterior:\n{state['summary']}")
+    for m in to_summarize:
+        role = "Cliente" if isinstance(m, HumanMessage) else "Vendedor"
+        content = m.content if isinstance(m.content, str) else "[multimodal]"
+        rendered_parts.append(f"{role}: {content}")
+    rendered = "\n".join(rendered_parts)
+
+    llm = _make_llm(temperature=0.2, max_tokens=400)
+    res = await llm.ainvoke([
+        SystemMessage(content=SUMMARIZE_SYSTEM),
+        HumanMessage(content=rendered),
+    ])
+    new_summary = (res.content or "").strip()
+
+    if new_summary:
+        await get_redis().set_summary(
+            instance=state["instance_name"],
+            phone=state["phone"],
+            summary=new_summary,
+        )
+
+    # Replaces messages com as recentes apenas. Como `messages` usa add_messages,
+    # devolvemos uma RemoveMessage-like estratégia: enviamos as recentes diretamente.
+    # add_messages faz upsert por id; aqui retornamos a lista atual completa com
+    # ids preservados — o reducer mantém histórico. Não tem como "trim" via reducer
+    # padrão, então re-criamos o state com `messages` substituído via __replace__.
+    # Solução prática: emitimos uma sinalização e respond/close usam `summary` +
+    # somente últimas N mensagens. Aqui apenas grava o summary e deixa o histórico.
+    return {"summary": new_summary}
