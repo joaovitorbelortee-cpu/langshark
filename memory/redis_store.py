@@ -193,3 +193,16 @@ class RedisStore:
 
     async def get_last_from(self, instance: str, phone: str) -> str:
         return (await self._cmd("GET", f"last_from:{instance}:{phone}")) or ""
+
+    # ────────────────────────────────────────────────────────────
+    # Lock distribuído por instância (pra evitar race entre webhooks)
+    # ────────────────────────────────────────────────────────────
+
+    async def acquire_lock(self, instance: str, phone: str, ttl_seconds: int = 30) -> bool:
+        """SET NX para lock. True = peguei. Caller deve liberar com release_lock()."""
+        key = f"lock:{instance}:{phone}"
+        result = await self._cmd("SET", key, "1", "NX", "EX", str(ttl_seconds))
+        return result == "OK"
+
+    async def release_lock(self, instance: str, phone: str) -> None:
+        await self._cmd("DEL", f"lock:{instance}:{phone}")

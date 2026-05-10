@@ -259,7 +259,18 @@ async def webhook(request: Request) -> dict:
         instance=instance,
         phone=phone,
     )
-    final_state = await _run_graph_streaming(initial_state, thread_id)
+
+    # Lock por (instância, telefone) — serializa mensagens do mesmo lead
+    # pra evitar 2 grafos rodando concorrentemente no mesmo histórico.
+    got_lock = await redis.acquire_lock(instance, phone, ttl_seconds=45)
+    if not got_lock:
+        log.info("[lock] %s/%s já em processamento — enfileirando ack", instance, phone)
+        return {"ok": True, "queued": True, "reason": "lock_held"}
+
+    try:
+        final_state = await _run_graph_streaming(initial_state, thread_id)
+    finally:
+        await redis.release_lock(instance, phone)
 
     # Agendar follow-up via QStash se a IA pediu E o cliente não converteu.
     schedule_min = final_state.get("schedule_minutes")
