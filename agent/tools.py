@@ -136,13 +136,47 @@ class EvolutionClient:
     async def _post(self, path: str, body: dict) -> dict:
         if not self.base_url:
             return {"success": False, "error": "EVOLUTION_API_URL não configurada"}
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            r = await client.post(f"{self.base_url}{path}", json=body, headers=self._headers())
+        return await self._post_with_retry(path, body)
+
+    async def _post_with_retry(
+        self,
+        path: str,
+        body: dict,
+        max_attempts: int = 3,
+        backoff_base: float = 0.5,
+    ) -> dict:
+        """
+        POST com retry exponencial (0.5s, 1s, 2s) em falhas transitórias.
+        Considera transitório: timeout, conexão recusada, status 5xx, 429.
+        Não retenta 4xx (exceto 429), 401, 403.
+        """
+        import asyncio
+
+        last_err: dict | None = None
+        for attempt in range(max_attempts):
             try:
-                payload = r.json()
-            except Exception:
-                payload = {"raw": r.text}
-            return {"success": r.is_success, "status": r.status_code, **payload}
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    r = await client.post(
+                        f"{self.base_url}{path}", json=body, headers=self._headers()
+                    )
+                    try:
+                        payload = r.json()
+                    except Exception:
+                        payload = {"raw": r.text}
+                    if r.is_success:
+                        return {"success": True, "status": r.status_code, **payload}
+                    # 4xx (≠ 429) → não retenta
+                    if r.status_code < 500 and r.status_code != 429:
+                        return {"success": False, "status": r.status_code, **payload}
+                    last_err = {"success": False, "status": r.status_code, **payload}
+            except (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError) as exc:
+                last_err = {"success": False, "error": str(exc), "type": exc.__class__.__name__}
+
+            # Backoff exponencial antes da próxima tentativa.
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(backoff_base * (2 ** attempt))
+
+        return last_err or {"success": False, "error": "unknown"}
 
     async def send_text(self, instance: str, to: str, text: str) -> dict:
         return await self._post(f"/message/sendText/{instance}", {"number": to, "text": text})

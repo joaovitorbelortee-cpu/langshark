@@ -21,6 +21,9 @@ from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from agent.checkpointer import CheckpointerProvider, thread_id_for
 from agent.graph import build_graph
@@ -56,7 +59,12 @@ async def lifespan(_app: FastAPI):
         _graph_app = None
 
 
+limiter = Limiter(key_func=get_remote_address, default_limits=["120/minute"])
+
 app = FastAPI(title="bot-vendas", lifespan=lifespan)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 redis = RedisStore()
 qstash = QStashClient()
 
@@ -178,7 +186,9 @@ async def _run_graph_streaming(initial_state: dict, thread_id: str) -> dict:
 
 @app.post("/webhook/evolution")
 @app.post("/webhook")
-async def webhook(req: Request) -> dict:
+@limiter.limit("60/minute")
+async def webhook(request: Request) -> dict:
+    req = request  # slowapi exige 'request' nomeado
     _check_auth(req)
     body = await req.json()
 
@@ -282,7 +292,9 @@ async def webhook(req: Request) -> dict:
 # ────────────────────────────────────────────────────────────────────
 
 @app.post("/api/trigger-followup")
-async def trigger_followup(req: Request) -> dict:
+@limiter.limit("30/minute")
+async def trigger_followup(request: Request) -> dict:
+    req = request
     """
     Endpoint chamado pelo QStash após N minutos.
     Body: {project_id, instance_name, phone, push_name}.
