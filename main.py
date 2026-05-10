@@ -1,29 +1,29 @@
 """
 Webhook FastAPI compatível com a Evolution API (mesma rota do bot antigo).
 
-Eventos tratados:
-  - messages.upsert   → roda o grafo de vendas
-  - presence.update   → marca digitando no Redis (informativo)
-  - connection.update → log apenas
+Responsabilidades do main.py (slim):
+  1. Auth timing-safe do webhook
+  2. Extração de campos do payload Evolution
+  3. Dedup por messageId no Redis
+  4. Dispara o grafo LangGraph com `astream_events` (logs por nó)
+  5. Lifecycle do checkpointer (open/close)
+
+TUDO o que é decisão, RAG, envio, persistência → vive dentro do grafo.
 """
 from __future__ import annotations
 
-import asyncio
 import hmac
 import logging
 import os
 import re
+from contextlib import asynccontextmanager
 from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 
-from agent.graph import get_graph
-from agent.tools import (
-    EvolutionClient,
-    jitter_between_bubbles_ms,
-    typing_delay_ms,
-)
+from agent.checkpointer import CheckpointerProvider, thread_id_for
+from agent.graph import build_graph
 from memory.redis_store import RedisStore
 
 
@@ -32,14 +32,35 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = logging.getLogger("bot-vendas")
 
 
-app = FastAPI(title="bot-vendas")
+# ────────────────────────────────────────────────────────────────────
+# Lifespan: cria checkpointer + grafo compartilhados por processo
+# ────────────────────────────────────────────────────────────────────
 
-evolution = EvolutionClient()
+_checkpointer_provider: CheckpointerProvider | None = None
+_graph_app: Any | None = None
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    global _checkpointer_provider, _graph_app
+    _checkpointer_provider = CheckpointerProvider()
+    cp = await _checkpointer_provider.shared()
+    _graph_app = build_graph(checkpointer=cp)
+    log.info("[startup] grafo compilado (checkpointer=%s)", _checkpointer_provider.kind)
+    try:
+        yield
+    finally:
+        if _checkpointer_provider:
+            await _checkpointer_provider.aclose()
+        _graph_app = None
+
+
+app = FastAPI(title="bot-vendas", lifespan=lifespan)
 redis = RedisStore()
 
 
 # ────────────────────────────────────────────────────────────────────
-# Helpers de auth (timing-safe igual ao bot antigo)
+# Auth (timing-safe igual ao bot antigo)
 # ────────────────────────────────────────────────────────────────────
 
 def _safe_eq(a: str, b: str) -> bool:
@@ -67,21 +88,7 @@ def _check_auth(req: Request) -> None:
 
 
 # ────────────────────────────────────────────────────────────────────
-# Resolver project_id pra instância (multi-tenant)
-# ────────────────────────────────────────────────────────────────────
-
-async def _resolve_project_id(instance: str, query_project: str | None) -> str:
-    """
-    No bot antigo, vinha de instance_projects (Supabase).
-    Aqui aceitamos via query (?project_id=) ou env padrão. Default: "padrao".
-    """
-    if query_project:
-        return query_project
-    return os.getenv("DEFAULT_PROJECT_ID", "padrao")
-
-
-# ────────────────────────────────────────────────────────────────────
-# Extração de payload Evolution (mesmas regras do webhook antigo)
+# Extração de payload Evolution
 # ────────────────────────────────────────────────────────────────────
 
 _CTRL_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
@@ -124,17 +131,43 @@ def _extract_media(message: dict, body_data: dict) -> dict | None:
 
 
 # ────────────────────────────────────────────────────────────────────
-# Envio de bolhas (replica simulateTyping + send_text + jitter)
+# Streaming do grafo com logs por nó
 # ────────────────────────────────────────────────────────────────────
 
-async def _send_chunks(instance: str, phone: str, chunks: list[str]) -> None:
-    for i, chunk in enumerate(chunks):
-        delay_ms = typing_delay_ms(chunk)
-        await evolution.send_typing(instance, phone, duration_ms=delay_ms)
-        await asyncio.sleep(delay_ms / 1000)
-        await evolution.send_text(instance, phone, chunk)
-        if i < len(chunks) - 1:
-            await asyncio.sleep(jitter_between_bubbles_ms() / 1000)
+_TRACED_NODES = {
+    "tenant_resolver", "load_history", "summarize", "vision",
+    "detect_intent", "retrieve_for_close", "retrieve_for_respond",
+    "close_sale", "respond", "greeting", "objection", "follow_up",
+    "flow_executor", "persist", "send",
+}
+
+
+async def _run_graph_streaming(initial_state: dict, thread_id: str) -> dict:
+    """
+    Executa o grafo com astream_events, logando cada nó conforme entra/sai.
+    Retorna o final_state quando o stream termina.
+    """
+    assert _graph_app is not None, "graph not initialized"
+    cfg = {"configurable": {"thread_id": thread_id}}
+    final_state: dict[str, Any] = {}
+
+    async for ev in _graph_app.astream_events(initial_state, config=cfg, version="v2"):
+        kind = ev.get("event") or ""
+        name = ev.get("name") or ""
+        if name not in _TRACED_NODES:
+            continue
+        if kind == "on_chain_start":
+            log.info("[graph] ▶ %s", name)
+        elif kind == "on_chain_end":
+            output = (ev.get("data") or {}).get("output") or {}
+            keys = ",".join(sorted(output.keys())) if isinstance(output, dict) else "—"
+            log.info("[graph] ✓ %s (patch=%s)", name, keys)
+
+    # Recupera o state final pelo checkpoint.
+    snap = await _graph_app.aget_state(cfg)
+    if snap:
+        final_state = dict(snap.values or {})
+    return final_state
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -161,7 +194,6 @@ async def webhook(req: Request) -> dict:
         return {"ok": True, "connectionState": state}
 
     if event == "presence.update":
-        # Não bloqueia o fluxo principal; só registra no Redis (informativo).
         return {"ok": True, "skipped": "presence"}
 
     if event != "messages.upsert":
@@ -193,44 +225,29 @@ async def webhook(req: Request) -> dict:
         if not first:
             return {"ok": True, "skipped": "duplicate", "messageId": message_id}
 
-    project_id = await _resolve_project_id(instance, req.query_params.get("project_id"))
+    project_id_hint = req.query_params.get("project_id") or ""
     push_name = data.get("pushName") or ""
-
     user_message = text or (media.get("caption") if media else "") or "[mídia]"
-    log.info("[msg] %s/%s/%s: %s", project_id, instance, phone, user_message[:80])
+    log.info("[msg] %s/%s/%s: %s", project_id_hint or "?", instance, phone, user_message[:80])
 
-    # Roda o grafo. As mensagens chegam sequencialmente — se quiser fila,
-    # plugue aqui o agendador (QStash/Celery/etc).
-    graph = get_graph()
     initial_state = {
-        "project_id": project_id,
+        "project_id": project_id_hint,
         "instance_name": instance,
         "phone": phone,
         "push_name": push_name,
         "user_message": user_message,
         "media_mime": media["mime"] if media else None,
         "media_base64": media["base64"] if media else None,
+        "message_id": message_id,
         "messages": [],
     }
-    final_state = await graph.ainvoke(initial_state)
 
-    chunks: list[str] = final_state.get("chunks") or []
-    if not chunks:
-        log.warning("[graph] sem resposta gerada para %s", phone)
-        return {"ok": True, "processed": True, "empty_reply": True}
-
-    # Reaction (se a IA pediu) — antes das bolhas, igual ao bot antigo.
-    if final_state.get("react_emoji") and message_id:
-        try:
-            await evolution.send_reaction(instance, phone, message_id, final_state["react_emoji"])
-        except Exception as exc:
-            log.warning("[react] falha: %s", exc)
-
-    await _send_chunks(instance, phone, chunks)
-
-    # TODO opcional: agendar follow-up via QStash usando final_state["schedule_minutes"]
-    # quando has_converted=False. Mantido como ponto de extensão para não trazer
-    # o ecossistema QStash inteiro pra cá agora.
+    thread_id = thread_id_for(
+        project_id=project_id_hint or "padrao",
+        instance=instance,
+        phone=phone,
+    )
+    final_state = await _run_graph_streaming(initial_state, thread_id)
 
     return {
         "ok": True,
@@ -238,7 +255,8 @@ async def webhook(req: Request) -> dict:
         "intent": final_state.get("intent"),
         "has_converted": final_state.get("has_converted", False),
         "schedule_minutes": final_state.get("schedule_minutes"),
-        "bubbles": len(chunks),
+        "sent_count": final_state.get("sent_count", 0),
+        "flow_dispatched": final_state.get("flow_dispatched", False),
     }
 
 
@@ -248,6 +266,7 @@ async def health() -> dict:
         "ok": True,
         "redis": "remote" if redis.remote_enabled else "local-fallback",
         "evolution": bool(os.getenv("EVOLUTION_API_URL")),
+        "checkpointer": _checkpointer_provider.kind if _checkpointer_provider else "uninit",
     }
 
 
