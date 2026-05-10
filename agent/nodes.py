@@ -303,17 +303,21 @@ async def close_sale_node(state: SalesState) -> dict[str, Any]:
     llm = _make_llm(temperature=0.5, max_tokens=400)
     res = await llm.ainvoke(messages)
     parsed = parse_tags(res.content or "")
-    chunks = chunk_for_whatsapp(parsed.text, max_bubbles=2, max_chars=320)
+    flow_name, cleaned_text = parse_flow_tag(parsed.text)
+    chunks = chunk_for_whatsapp(cleaned_text, max_bubbles=2, max_chars=320)
 
-    return {
-        "reply": parsed.text,
+    patch: dict[str, Any] = {
+        "reply": cleaned_text,
         "chunks": chunks,
         "has_converted": parsed.has_converted,
         "schedule_minutes": parsed.schedule_minutes,
         "react_emoji": parsed.react_emoji,
         "quote_previous": parsed.quote_previous,
-        "messages": [AIMessage(content=parsed.text)],
+        "messages": [AIMessage(content=cleaned_text)],
     }
+    if flow_name and get_flow(state["project_id"], flow_name):
+        patch["flow_name"] = flow_name
+    return patch
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -471,17 +475,21 @@ async def _run_specialist(
     llm = _make_llm(temperature=temperature, max_tokens=max_tokens)
     res = await llm.ainvoke(messages)
     parsed = parse_tags(res.content or "")
-    chunks = chunk_for_whatsapp(parsed.text, max_bubbles=2, max_chars=320)
+    flow_name, cleaned_text = parse_flow_tag(parsed.text)
+    chunks = chunk_for_whatsapp(cleaned_text, max_bubbles=2, max_chars=320)
 
-    return {
-        "reply": parsed.text,
+    patch: dict[str, Any] = {
+        "reply": cleaned_text,
         "chunks": chunks,
         "has_converted": parsed.has_converted,
         "schedule_minutes": parsed.schedule_minutes,
         "react_emoji": parsed.react_emoji,
         "quote_previous": parsed.quote_previous,
-        "messages": [AIMessage(content=parsed.text)],
+        "messages": [AIMessage(content=cleaned_text)],
     }
+    if flow_name and get_flow(state["project_id"], flow_name):
+        patch["flow_name"] = flow_name
+    return patch
 
 
 async def greeting_node(state: SalesState) -> dict[str, Any]:
