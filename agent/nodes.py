@@ -669,3 +669,58 @@ async def tenant_resolver_node(state: SalesState) -> dict[str, Any]:
     if not project_id:
         project_id = os.getenv("DEFAULT_PROJECT_ID", "padrao")
     return {"project_id": project_id}
+
+
+# ────────────────────────────────────────────────────────────────────
+# Nó: send (envia bolhas no WhatsApp com typing e jitter)
+# ────────────────────────────────────────────────────────────────────
+
+async def send_node(state: SalesState) -> dict[str, Any]:
+    """
+    Envia as bolhas geradas por respond/close/specialists via Evolution API.
+    Aplica typing simulation + jitter entre bolhas + reação opcional.
+
+    Pula se:
+      - flow_dispatched=True (flow_executor_node já enviou tudo)
+      - chunks vazio
+    """
+    import asyncio
+
+    from agent.tools import jitter_between_bubbles_ms, typing_delay_ms
+
+    if state.get("flow_dispatched"):
+        return {}
+
+    chunks = state.get("chunks") or []
+    if not chunks:
+        return {"sent": False, "sent_count": 0}
+
+    evo = get_evolution()
+    instance = state["instance_name"]
+    phone = state["phone"]
+    message_id = state.get("message_id", "")
+
+    # Reação opcional (antes das bolhas, igual ao bot antigo)
+    react_emoji = state.get("react_emoji")
+    if react_emoji and message_id:
+        try:
+            await evo.send_reaction(instance, phone, message_id, react_emoji)
+        except Exception:  # noqa: BLE001
+            pass  # reação é cosmético; não falha o envio
+
+    sent = 0
+    for i, chunk in enumerate(chunks):
+        delay = typing_delay_ms(chunk)
+        try:
+            await evo.send_typing(instance, phone, duration_ms=delay)
+            await asyncio.sleep(delay / 1000)
+            r = await evo.send_text(instance, phone, chunk)
+            if r.get("success"):
+                sent += 1
+            if i < len(chunks) - 1:
+                await asyncio.sleep(jitter_between_bubbles_ms() / 1000)
+        except Exception:  # noqa: BLE001
+            # Não derruba o grafo — registra parcial e segue.
+            continue
+
+    return {"sent": sent > 0, "sent_count": sent}

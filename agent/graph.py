@@ -1,14 +1,27 @@
 """
 Construção do grafo LangGraph.
 
-Topologia (atualizada nas etapas seguintes):
+Topologia:
 
     START
-      └─> load_history
-            └─> detect_intent
-                  ├─[comprou]──────────────> persist ─> END
-                  ├─[intencao_compra]─────> retrieve_catalog ─> close_sale ─> persist ─> END
-                  └─[outros]──────────────> retrieve_catalog ─> respond     ─> persist ─> END
+      └─> tenant_resolver
+            └─> load_history
+                  └─> summarize
+                        └─[mídia?]─┬─> vision ─┐
+                                   └──────────┬┘
+                                              v
+                                       detect_intent
+                  ┌──────────[saudacao]───> greeting    ─┐
+                  ├──────────[objecao]────> objection   ─┤
+                  ├──────────[follow_up]──> follow_up   ─┤
+                  ├──[intencao_compra]──> retrieve_for_close ─> close_sale ─┤
+                  ├──────────[comprou]───────────────────────────────────────┤
+                  └──────────[outros]──── retrieve_for_respond ─> respond  ─┤
+                                                                            │
+                                          ┌───────[flow_name?]──> flow_executor ─┤
+                                          │                                      │
+                                          v                                      v
+                                       persist ─> send ─> END
 
 Compila com checkpointer opcional (Postgres ou in-memory) — passe `checkpointer`
 em build_graph() pra ativar persistência durável de state entre invocações.
@@ -30,6 +43,7 @@ from agent.nodes import (
     persist_node,
     respond_node,
     retrieve_catalog_node,
+    send_node,
     summarize_node,
     tenant_resolver_node,
     vision_node,
@@ -84,6 +98,7 @@ def build_graph(checkpointer: Any | None = None):
     g.add_node("follow_up", follow_up_node)
     g.add_node("flow_executor", flow_executor_node)
     g.add_node("persist", persist_node)
+    g.add_node("send", send_node)
 
     g.add_edge(START, "tenant_resolver")
     g.add_edge("tenant_resolver", "load_history")
@@ -120,7 +135,8 @@ def build_graph(checkpointer: Any | None = None):
         )
 
     g.add_edge("flow_executor", "persist")
-    g.add_edge("persist", END)
+    g.add_edge("persist", "send")
+    g.add_edge("send", END)
 
     if checkpointer is not None:
         return g.compile(checkpointer=checkpointer)
