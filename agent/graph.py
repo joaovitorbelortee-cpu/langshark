@@ -26,6 +26,7 @@ from agent.nodes import (
     persist_node,
     respond_node,
     retrieve_catalog_node,
+    vision_node,
 )
 from agent.state import SalesState
 
@@ -39,11 +40,19 @@ def _route_after_intent(state: SalesState) -> str:
     return "respond_path"
 
 
+def _route_after_history(state: SalesState) -> str:
+    """Se houver mídia base64, passa por vision antes do classificador."""
+    if state.get("media_base64") and state.get("media_mime"):
+        return "vision_path"
+    return "intent_path"
+
+
 def build_graph(checkpointer: Any | None = None):
     """Compila o grafo. Retorna um Runnable pronto pra ainvoke."""
     g: StateGraph = StateGraph(SalesState)
 
     g.add_node("load_history", load_history_node)
+    g.add_node("vision", vision_node)
     g.add_node("detect_intent", detect_intent_node)
     g.add_node("retrieve_for_close", retrieve_catalog_node)
     g.add_node("retrieve_for_respond", retrieve_catalog_node)
@@ -52,7 +61,12 @@ def build_graph(checkpointer: Any | None = None):
     g.add_node("persist", persist_node)
 
     g.add_edge(START, "load_history")
-    g.add_edge("load_history", "detect_intent")
+    g.add_conditional_edges(
+        "load_history",
+        _route_after_history,
+        {"vision_path": "vision", "intent_path": "detect_intent"},
+    )
+    g.add_edge("vision", "detect_intent")
 
     g.add_conditional_edges(
         "detect_intent",

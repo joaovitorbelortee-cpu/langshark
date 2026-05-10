@@ -272,3 +272,58 @@ async def persist_node(state: SalesState) -> dict[str, Any]:
             content=state["reply"],
         )
     return {}
+
+
+# ────────────────────────────────────────────────────────────────────
+# Nó: vision (mídia base64 — imagem/áudio/vídeo/documento)
+# ────────────────────────────────────────────────────────────────────
+
+_VISION_INSTRUCTION_BY_MIME: dict[str, str] = {
+    "image": (
+        "O cliente enviou uma IMAGEM. Analise o CONTEXTO da conversa antes de julgar a imagem.\n"
+        "- CASO 1 (Pagamento): se o cliente estava prestes a pagar ou disse que ia mandar o comprovante, "
+        "verifique se a imagem é um PIX/transferência/boleto autêntico (com valor, data e ID). "
+        "Se for, confirme o pagamento e adicione [COMPROU]. Se for falso/ilegível, peça o comprovante correto SEM [COMPROU].\n"
+        "- CASO 2 (Bate-papo normal): apenas comente a foto naturalmente como vendedor real e continue a conversa."
+    ),
+    "audio": "O cliente enviou um ÁUDIO. Transcreva mentalmente o que ele disse e responda normalmente.",
+    "video": "O cliente enviou um VÍDEO. Descreva o que acontece e responda.",
+    "document": "O cliente enviou um DOCUMENTO/arquivo. Analise o conteúdo e responda.",
+}
+
+
+def _vision_instruction(mime: str | None) -> str:
+    if not mime:
+        return _VISION_INSTRUCTION_BY_MIME["document"]
+    kind = mime.split("/")[0]
+    return _VISION_INSTRUCTION_BY_MIME.get(kind, _VISION_INSTRUCTION_BY_MIME["document"])
+
+
+async def vision_node(state: SalesState) -> dict[str, Any]:
+    """
+    Quando há mídia base64, substitui a última HumanMessage por uma multi-modal
+    (text + image_url no formato OpenAI vision). Sem chamada extra de LLM — só
+    enriquece a mensagem que respond/close_sale vão consumir.
+    """
+    mime = state.get("media_mime")
+    b64 = state.get("media_base64")
+    if not mime or not b64:
+        return {}
+
+    instruction = _vision_instruction(mime)
+    caption_text = state.get("user_message") or ""
+    text_part = f"{instruction}\n\nLegenda do cliente: \"{caption_text}\"" if caption_text else instruction
+    data_url = f"data:{mime};base64,{b64}"
+
+    multimodal_user = HumanMessage(
+        content=[
+            {"type": "text", "text": text_part},
+            {"type": "image_url", "image_url": {"url": data_url}},
+        ]
+    )
+
+    # Reescreve `messages` mantendo o histórico e substituindo só a última user msg.
+    history = list(state.get("messages") or [])
+    while history and isinstance(history[-1], HumanMessage):
+        history.pop()
+    return {"messages": [*history, multimodal_user]}
