@@ -17,6 +17,7 @@ from agent.flows import flows_prompt_block, get_flow, parse_flow_tag
 from agent.state import Intent, SalesState
 from agent.tools import EvolutionClient, chunk_for_whatsapp, parse_tags
 from memory.redis_store import RedisStore
+from memory.supabase_tenant import TenantResolver
 from rag.catalog import CatalogRAG
 
 
@@ -26,6 +27,7 @@ from rag.catalog import CatalogRAG
 
 _redis: RedisStore | None = None
 _rag: CatalogRAG | None = None
+_tenant: TenantResolver | None = None
 
 
 def get_redis() -> RedisStore:
@@ -40,6 +42,13 @@ def get_rag() -> CatalogRAG:
     if _rag is None:
         _rag = CatalogRAG()
     return _rag
+
+
+def get_tenant_resolver() -> TenantResolver:
+    global _tenant
+    if _tenant is None:
+        _tenant = TenantResolver()
+    return _tenant
 
 
 def _make_llm(temperature: float = 0.7, max_tokens: int = 1000) -> ChatOpenAI:
@@ -641,3 +650,22 @@ async def flow_executor_node(state: SalesState) -> dict[str, Any]:
             continue
 
     return {"flow_dispatched": True, "sent": sent > 0, "sent_count": sent}
+
+
+# ────────────────────────────────────────────────────────────────────
+# Nó: tenant_resolver (project_id via Supabase instance_projects)
+# ────────────────────────────────────────────────────────────────────
+
+async def tenant_resolver_node(state: SalesState) -> dict[str, Any]:
+    """
+    Se project_id já veio (query string ou injetado), respeita.
+    Senão, busca em instance_projects via Supabase. Fallback: DEFAULT_PROJECT_ID.
+    """
+    if state.get("project_id"):
+        return {}
+
+    resolver = get_tenant_resolver()
+    project_id = await resolver.resolve(state["instance_name"])
+    if not project_id:
+        project_id = os.getenv("DEFAULT_PROJECT_ID", "padrao")
+    return {"project_id": project_id}

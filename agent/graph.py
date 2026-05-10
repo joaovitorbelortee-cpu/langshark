@@ -31,6 +31,7 @@ from agent.nodes import (
     respond_node,
     retrieve_catalog_node,
     summarize_node,
+    tenant_resolver_node,
     vision_node,
 )
 from agent.state import SalesState
@@ -69,6 +70,7 @@ def build_graph(checkpointer: Any | None = None):
     """Compila o grafo. Retorna um Runnable pronto pra ainvoke."""
     g: StateGraph = StateGraph(SalesState)
 
+    g.add_node("tenant_resolver", tenant_resolver_node)
     g.add_node("load_history", load_history_node)
     g.add_node("summarize", summarize_node)
     g.add_node("vision", vision_node)
@@ -83,7 +85,8 @@ def build_graph(checkpointer: Any | None = None):
     g.add_node("flow_executor", flow_executor_node)
     g.add_node("persist", persist_node)
 
-    g.add_edge(START, "load_history")
+    g.add_edge(START, "tenant_resolver")
+    g.add_edge("tenant_resolver", "load_history")
     g.add_edge("load_history", "summarize")
     g.add_conditional_edges(
         "summarize",
