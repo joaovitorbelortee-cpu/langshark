@@ -22,6 +22,7 @@ from langgraph.graph import END, START, StateGraph
 from agent.nodes import (
     close_sale_node,
     detect_intent_node,
+    flow_executor_node,
     follow_up_node,
     greeting_node,
     load_history_node,
@@ -57,6 +58,13 @@ def _route_after_history(state: SalesState) -> str:
     return "intent_path"
 
 
+def _route_after_reply(state: SalesState) -> str:
+    """Depois de respond/close/specialists: se IA pediu fluxo, dispara; senão segue."""
+    if state.get("flow_name"):
+        return "flow_path"
+    return "persist_path"
+
+
 def build_graph(checkpointer: Any | None = None):
     """Compila o grafo. Retorna um Runnable pronto pra ainvoke."""
     g: StateGraph = StateGraph(SalesState)
@@ -72,6 +80,7 @@ def build_graph(checkpointer: Any | None = None):
     g.add_node("greeting", greeting_node)
     g.add_node("objection", objection_node)
     g.add_node("follow_up", follow_up_node)
+    g.add_node("flow_executor", flow_executor_node)
     g.add_node("persist", persist_node)
 
     g.add_edge(START, "load_history")
@@ -97,15 +106,17 @@ def build_graph(checkpointer: Any | None = None):
     )
 
     g.add_edge("retrieve_for_close", "close_sale")
-    g.add_edge("close_sale", "persist")
-
     g.add_edge("retrieve_for_respond", "respond")
-    g.add_edge("respond", "persist")
 
-    g.add_edge("greeting", "persist")
-    g.add_edge("objection", "persist")
-    g.add_edge("follow_up", "persist")
+    # Após qualquer nó que produz reply, decide entre fluxo cadastrado ou persistência.
+    for reply_node in ("close_sale", "respond", "greeting", "objection", "follow_up"):
+        g.add_conditional_edges(
+            reply_node,
+            _route_after_reply,
+            {"flow_path": "flow_executor", "persist_path": "persist"},
+        )
 
+    g.add_edge("flow_executor", "persist")
     g.add_edge("persist", END)
 
     if checkpointer is not None:

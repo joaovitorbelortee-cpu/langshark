@@ -13,8 +13,9 @@ from typing import Any
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
+from agent.flows import flows_prompt_block, get_flow, parse_flow_tag
 from agent.state import Intent, SalesState
-from agent.tools import chunk_for_whatsapp, parse_tags
+from agent.tools import EvolutionClient, chunk_for_whatsapp, parse_tags
 from memory.redis_store import RedisStore
 from rag.catalog import CatalogRAG
 
@@ -116,7 +117,11 @@ Sempre encerre com [AGENDAR: N], a menos que [COMPROU] esteja presente.
 </tags_secretas>"""
 
 
-def _build_system_prompt(catalog_block: str, summary: str = "") -> str:
+def _build_system_prompt(
+    catalog_block: str,
+    summary: str = "",
+    flows_block: str = "",
+) -> str:
     prompt = SALES_SYSTEM
     if summary:
         prompt += (
@@ -127,7 +132,23 @@ def _build_system_prompt(catalog_block: str, summary: str = "") -> str:
         )
     if catalog_block:
         prompt += "\n\n" + catalog_block
+    if flows_block:
+        prompt += "\n\n" + flows_block
     return prompt
+
+
+def _detect_flow_patch(project_id: str, raw_reply: str) -> dict[str, Any]:
+    """
+    Detecta tag [FLOW: nome]. Se válido, devolve patch que sinaliza ao grafo
+    pra executar o fluxo. Caso contrário, devolve patch vazio.
+    """
+    flow_name, _cleaned = parse_flow_tag(raw_reply)
+    if not flow_name:
+        return {}
+    flow = get_flow(project_id, flow_name)
+    if not flow:
+        return {}
+    return {"flow_name": flow.name}
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -205,8 +226,13 @@ async def retrieve_catalog_node(state: SalesState) -> dict[str, Any]:
 
 async def respond_node(state: SalesState) -> dict[str, Any]:
     """Gera a resposta de vendas, parseia tags, prepara chunks."""
+    project_id = state["project_id"]
     catalog_block = get_rag().format_context(state.get("catalog_hits", []) or [])
-    system_prompt = _build_system_prompt(catalog_block, state.get("summary", ""))
+    system_prompt = _build_system_prompt(
+        catalog_block,
+        state.get("summary", ""),
+        flows_prompt_block(project_id),
+    )
 
     messages: list[Any] = [SystemMessage(content=system_prompt)]
     messages.extend(state.get("messages", []))
@@ -216,17 +242,22 @@ async def respond_node(state: SalesState) -> dict[str, Any]:
     raw = res.content or ""
 
     parsed = parse_tags(raw)
-    chunks = chunk_for_whatsapp(parsed.text, max_bubbles=2, max_chars=320)
+    # Remove a tag [FLOW: nome] do texto antes de chunkar.
+    flow_name, cleaned_text = parse_flow_tag(parsed.text)
+    chunks = chunk_for_whatsapp(cleaned_text, max_bubbles=2, max_chars=320)
 
-    return {
-        "reply": parsed.text,
+    patch: dict[str, Any] = {
+        "reply": cleaned_text,
         "chunks": chunks,
         "has_converted": parsed.has_converted,
         "schedule_minutes": parsed.schedule_minutes,
         "react_emoji": parsed.react_emoji,
         "quote_previous": parsed.quote_previous,
-        "messages": [AIMessage(content=parsed.text)],
+        "messages": [AIMessage(content=cleaned_text)],
     }
+    if flow_name and get_flow(project_id, flow_name):
+        patch["flow_name"] = flow_name
+    return patch
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -525,3 +556,88 @@ async def summarize_node(state: SalesState) -> dict[str, Any]:
     # Solução prática: emitimos uma sinalização e respond/close usam `summary` +
     # somente últimas N mensagens. Aqui apenas grava o summary e deixa o histórico.
     return {"summary": new_summary}
+
+
+# ────────────────────────────────────────────────────────────────────
+# Nó: flow_executor (executa fluxo pré-cadastrado direto via Evolution)
+# ────────────────────────────────────────────────────────────────────
+
+_evolution: EvolutionClient | None = None
+
+
+def get_evolution() -> EvolutionClient:
+    """Singleton do cliente Evolution. main.py pode injetar via set_evolution()."""
+    global _evolution
+    if _evolution is None:
+        _evolution = EvolutionClient()
+    return _evolution
+
+
+def set_evolution(client: EvolutionClient) -> None:
+    """Injeta um EvolutionClient (útil pra testes com mocks)."""
+    global _evolution
+    _evolution = client
+
+
+async def flow_executor_node(state: SalesState) -> dict[str, Any]:
+    """
+    Dispara a sequência cadastrada pelo nome state["flow_name"]. Marca
+    flow_dispatched=True pra send_node pular o envio padrão de chunks.
+    """
+    import asyncio
+    import random
+
+    flow_name = state.get("flow_name")
+    if not flow_name:
+        return {}
+
+    flow = get_flow(state["project_id"], flow_name)
+    if not flow:
+        return {"flow_dispatched": False}
+
+    evo = get_evolution()
+    instance = state["instance_name"]
+    to = state["phone"]
+    sent = 0
+
+    for i, step in enumerate(flow.steps):
+        if i > 0:
+            await asyncio.sleep(1.5 + random.random() * 1.0)
+        kind = (step.get("type") or "").lower()
+        try:
+            if kind == "text":
+                await evo.send_typing(instance, to, duration_ms=1200)
+                await asyncio.sleep(1.2)
+                await evo.send_text(instance, to, step.get("content", ""))
+                sent += 1
+            elif kind in ("image", "video", "audio", "document"):
+                # Envia URL direto (a Evolution baixa do CDN).
+                # Para base64 local, plugue uma extensão futura.
+                url = step.get("url") or step.get("filePath")
+                if not url:
+                    continue
+                # Reusa send_text como fallback se Evolution não tiver helper:
+                # endpoint correto seria /message/sendMedia/<inst> com mediatype.
+                body = {
+                    "number": to,
+                    "mediatype": kind,
+                    "media": url,
+                    "caption": step.get("caption", ""),
+                }
+                if kind == "document" and step.get("fileName"):
+                    body["fileName"] = step["fileName"]
+                # _post é privado; uso public send_text como base de retry e
+                # delego via httpx pra path sendMedia.
+                async with __import__("httpx").AsyncClient(timeout=evo.timeout) as client:
+                    r = await client.post(
+                        f"{evo.base_url}/message/sendMedia/{instance}",
+                        json=body,
+                        headers={"apikey": evo.api_key, "Content-Type": "application/json"},
+                    )
+                    if r.is_success:
+                        sent += 1
+        except Exception:  # noqa: BLE001
+            # Não derruba o grafo — segue pro próximo step.
+            continue
+
+    return {"flow_dispatched": True, "sent": sent > 0, "sent_count": sent}
