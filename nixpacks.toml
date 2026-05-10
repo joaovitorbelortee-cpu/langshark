@@ -1,0 +1,17 @@
+# Fallback se Railway escolher Nixpacks ao invés de Dockerfile.
+
+[phases.setup]
+nixPkgs = ["python311", "gcc", "postgresql.lib"]
+
+[phases.install]
+cmds = ["python -m venv /opt/venv", ". /opt/venv/bin/activate && pip install -r requirements.txt"]
+
+[phases.build]
+cmds = ["echo 'no build step'"]
+
+[start]
+cmd = ". /opt/venv/bin/activate && uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"
+
+[variables]
+PYTHONUNBUFFERED = "1"
+CHROMA_DIR = "/data/chroma"

@@ -1,0 +1,11 @@
+.git
+.venv
+__pycache__
+.pytest_cache
+chroma_db/
+.env
+.env.local
+*.pyc
+.planning/
+tests/
+README.md
