@@ -19,6 +19,7 @@ from agent.tools import EvolutionClient, chunk_for_whatsapp, parse_tags
 from memory.redis_store import RedisStore
 from memory.supabase_tenant import TenantResolver
 from rag.catalog import CatalogRAG
+from rag.supabase_rag import SupabaseRAG
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -26,7 +27,7 @@ from rag.catalog import CatalogRAG
 # ────────────────────────────────────────────────────────────────────
 
 _redis: RedisStore | None = None
-_rag: CatalogRAG | None = None
+_rag: Any = None
 _tenant: TenantResolver | None = None
 
 
@@ -37,10 +38,18 @@ def get_redis() -> RedisStore:
     return _redis
 
 
-def get_rag() -> CatalogRAG:
+def get_rag() -> Any:
+    """
+    Prefere SupabaseRAG quando SUPABASE_URL configurada (persistente, sem disco).
+    Cai pra CatalogRAG (ChromaDB local) caso contrário.
+    """
     global _rag
     if _rag is None:
-        _rag = CatalogRAG()
+        sb = SupabaseRAG()
+        if sb.enabled:
+            _rag = sb
+        else:
+            _rag = CatalogRAG()
     return _rag
 
 
@@ -236,11 +245,15 @@ async def retrieve_catalog_node(state: SalesState) -> dict[str, Any]:
     if intent in ("saudacao", "comprou"):
         return {"catalog_hits": []}
 
-    hits = get_rag().search(
-        project_id=state["project_id"],
-        query=state.get("user_message") or "",
-        top_k=4,
-    )
+    rag = get_rag()
+    project_id = state["project_id"]
+    query = state.get("user_message") or ""
+
+    # SupabaseRAG expõe asearch (HTTP); CatalogRAG só sync (.search).
+    if hasattr(rag, "asearch"):
+        hits = await rag.asearch(project_id=project_id, query=query, top_k=4)
+    else:
+        hits = rag.search(project_id=project_id, query=query, top_k=4)
     return {"catalog_hits": hits}
 
 
