@@ -261,9 +261,9 @@ A IA emite tags que o sistema le e remove ANTES de mandar pro cliente:
 - [REACT: emoji] — bot reage com 1 emoji. PARCIMONIA: 20-30% das msgs.
     Use SO quando: engraçada(😂), triste(😢), empolgante(🔥), surpresa(😮),
     agradecimento(🙏), confirmou compra(🎉). Nunca 2 seguidas.
-- [QUOTE] — bot cita msg do cliente (Responder WhatsApp). 15-25% das respostas.
-    Use SO quando: pergunta especifica, mudanca de tema, multiplas perguntas.
-    Nunca em saudacao/ok/valeu. Nunca 2 seguidas.
+- [QUOTE] — bot cita msg do cliente (Responder WhatsApp).
+    AUTOMATICO quando msg tem "?". Use manual em: mudanca de tema,
+    multiplas perguntas/afirmacoes, contexto necessario. Nunca 2 seguidas.
 
 Sempre encerre com [AGENDAR: N], a menos que [COMPROU] esteja presente.
 </tags_secretas>"""
@@ -1029,18 +1029,25 @@ async def send_node(state: SalesState) -> dict[str, Any]:
         except Exception as exc:  # noqa: BLE001
             log.debug("[send] reaction falhou (cosmético): %s", exc)
 
-    # Quote — só na primeira bolha, com cooldown server-side
+    # Quote — só na primeira bolha, com cooldown server-side.
+    # Regra extra: SE cliente fez pergunta ("?"), força quote (override LLM).
+    # Cooldown segue valendo — 2 perguntas em rajada → só 1ª recebe quote.
     quote_id: str | None = None
     quote_text: str | None = None
-    if state.get("quote_previous") and message_id:
+    user_msg = state.get("user_message", "") or ""
+    is_question = "?" in user_msg
+    should_quote = bool(state.get("quote_previous")) or is_question
+    if should_quote and message_id:
         try:
             last_quote = await redis._cmd("GET", f"quote_last:{instance}:{phone}")
             if not last_quote:
                 quote_id = message_id
-                quote_text = state.get("user_message") or None
+                quote_text = user_msg or None
                 await redis._cmd("SET", f"quote_last:{instance}:{phone}", "1",
                                  "EX", str(QUOTE_COOLDOWN_S))
-                log.info("[send] quote %s/%s msg=%s", instance, phone, message_id)
+                reason = "pergunta" if (is_question and not state.get("quote_previous")) else "llm"
+                log.info("[send] quote %s/%s msg=%s reason=%s",
+                         instance, phone, message_id, reason)
             else:
                 log.debug("[send] quote cooldown ativo — pula %s/%s", instance, phone)
         except Exception as exc:  # noqa: BLE001

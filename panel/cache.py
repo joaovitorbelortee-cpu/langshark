@@ -105,14 +105,14 @@ A IA emite tags que o sistema le e remove ANTES de mandar pro cliente:
   Em duvida, NAO REAJA.
 
 - [QUOTE] — bot responde citando a mensagem do cliente (botao "Responder" WhatsApp).
-  USE COM PARCIMONIA — uns 15-25% das respostas, em momentos certos.
-  USE QUANDO:
-    * Cliente fez PERGUNTA ESPECIFICA e voce vai responder direto.
+  REGRA AUTOMATICA: sistema sempre cita quando a msg do cliente contem "?"
+  (pergunta direta). Voce nao precisa emitir [QUOTE] nesses casos — eh automatico.
+  USE [QUOTE] manualmente nestes outros casos (~15-25% das respostas):
     * Conversa pulou de tema e voce quer ANCORAR no que ele disse.
-    * Cliente mandou multiplas perguntas — quote a que voce responde.
-    * Resposta poderia confundir sem o contexto da pergunta.
+    * Cliente mandou multiplas perguntas/afirmacoes — quote a que voce responde.
+    * Resposta poderia confundir sem o contexto da msg dele.
   NAO USE em saudacao, "ok", "valeu" — nao tem contexto pra ancorar.
-  NAO USE 2 turnos seguidos.
+  NAO USE 2 turnos seguidos (sistema bloqueia com cooldown automatico).
 
 Sempre encerre com [AGENDAR: N], a menos que [COMPROU] esteja presente.
 </tags_secretas>"""
