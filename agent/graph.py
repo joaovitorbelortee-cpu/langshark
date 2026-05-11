@@ -35,6 +35,7 @@ import os
 from langchain_core.messages import AIMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
+from langgraph.types import RetryPolicy
 
 from agent.evolution_tools import EVOLUTION_TOOLS
 from agent.nodes import (
@@ -141,24 +142,34 @@ def build_graph(checkpointer: Any | None = None, store: Any | None = None):
     """
     g: StateGraph = StateGraph(SalesState)
 
+    # RetryPolicy padrão pra nós que chamam LLM: 2 tentativas, backoff
+    # exponencial. Sem isso, single 429/timeout do provider derruba o turno.
+    # Recommended pattern dos docs LangGraph oficial.
+    llm_retry = RetryPolicy(
+        max_attempts=2,
+        initial_interval=0.5,
+        backoff_factor=2.0,
+        jitter=True,
+    )
+
     g.add_node("tenant_resolver", tenant_resolver_node)
     g.add_node("load_system_prompt", load_system_prompt_node)
     g.add_node("load_history", load_history_node)
-    g.add_node("summarize", summarize_node)
-    g.add_node("vision", vision_node)
-    g.add_node("detect_intent", detect_intent_node)
-    g.add_node("lead_memory", lead_memory_node)
+    g.add_node("summarize", summarize_node, retry_policy=llm_retry)            # LLM
+    g.add_node("vision", vision_node, retry_policy=llm_retry)                  # LLM
+    g.add_node("detect_intent", detect_intent_node, retry_policy=llm_retry)    # LLM
+    g.add_node("lead_memory", lead_memory_node, retry_policy=llm_retry)        # LLM
     g.add_node("retrieve_for_close", retrieve_catalog_node)
     g.add_node("retrieve_for_respond", retrieve_catalog_node)
-    g.add_node("close_sale", close_sale_node)
-    g.add_node("respond", respond_node)
-    g.add_node("greeting", greeting_node)
-    g.add_node("objection", objection_node)
-    g.add_node("follow_up", follow_up_node)
+    g.add_node("close_sale", close_sale_node, retry_policy=llm_retry)          # LLM
+    g.add_node("respond", respond_node, retry_policy=llm_retry)                # LLM
+    g.add_node("greeting", greeting_node, retry_policy=llm_retry)              # LLM
+    g.add_node("objection", objection_node, retry_policy=llm_retry)            # LLM
+    g.add_node("follow_up", follow_up_node, retry_policy=llm_retry)            # LLM
     g.add_node("flow_executor", flow_executor_node)
     g.add_node("tools", ToolNode(EVOLUTION_TOOLS))
-    g.add_node("supervisor", supervisor_node)
-    g.add_node("strategist", follow_up_strategist_node)
+    g.add_node("supervisor", supervisor_node, retry_policy=llm_retry)          # LLM
+    g.add_node("strategist", follow_up_strategist_node, retry_policy=llm_retry)# LLM
     g.add_node("persist", persist_node)
     g.add_node("send", send_node)
 
