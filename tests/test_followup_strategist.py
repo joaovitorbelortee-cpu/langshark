@@ -290,3 +290,76 @@ async def test_attempt_counter_per_phone_isolated():
     assert await store.get_followup_attempts("inst", "111") == 2
     assert await store.get_followup_attempts("inst", "222") == 1
     assert await store.get_followup_attempts("inst", "333") == 0
+
+
+# ────────────────────────────────────────────────────────────────────
+# Lead status registry — alimenta painel Reconquista
+# ────────────────────────────────────────────────────────────────────
+
+async def test_lead_status_roundtrip():
+    """set_lead_status + get_lead_status preservam JSON aninhado."""
+    from memory.redis_store import RedisStore
+    store = RedisStore(url="", token="")
+    snapshot = {
+        "project_id": "padrao",
+        "instance": "botzap",
+        "phone": "5511999999999",
+        "temperatura": "HOT",
+        "abordagem": "commitment",
+        "razao": "escolheu plano anual",
+        "agendar_minutos": 30,
+        "attempts_made": 0,
+        "last_decision_at": "2026-05-11T12:00:00+00:00",
+        "next_followup_at": "2026-05-11T12:30:00+00:00",
+        "killswitch_permanent": False,
+    }
+    await store.set_lead_status("botzap", "5511999999999", snapshot)
+    got = await store.get_lead_status("botzap", "5511999999999")
+    assert got is not None
+    assert got["temperatura"] == "HOT"
+    assert got["agendar_minutos"] == 30
+
+
+async def test_lead_status_missing_returns_none():
+    from memory.redis_store import RedisStore
+    store = RedisStore(url="", token="")
+    assert await store.get_lead_status("inst", "1234") is None
+
+
+async def test_lead_status_list_orders_by_recency():
+    """list_lead_statuses retorna mais recente primeiro."""
+    from memory.redis_store import RedisStore
+    store = RedisStore(url="", token="")
+    await store.set_lead_status("inst", "111", {
+        "phone": "111", "temperatura": "WARM",
+        "last_decision_at": "2026-05-11T10:00:00+00:00",
+    })
+    await store.set_lead_status("inst", "222", {
+        "phone": "222", "temperatura": "HOT",
+        "last_decision_at": "2026-05-11T15:00:00+00:00",
+    })
+    await store.set_lead_status("inst", "333", {
+        "phone": "333", "temperatura": "COLD",
+        "last_decision_at": "2026-05-11T12:00:00+00:00",
+    })
+    leads = await store.list_lead_statuses()
+    assert len(leads) == 3
+    # Mais recente primeiro: 222 (15h), 333 (12h), 111 (10h)
+    assert leads[0]["phone"] == "222"
+    assert leads[1]["phone"] == "333"
+    assert leads[2]["phone"] == "111"
+
+
+async def test_lead_status_list_dedups_repeated_updates():
+    """Múltiplos sets na mesma chave → apenas 1 entry na lista."""
+    from memory.redis_store import RedisStore
+    store = RedisStore(url="", token="")
+    for i in range(5):
+        await store.set_lead_status("inst", "111", {
+            "phone": "111", "temperatura": "WARM",
+            "last_decision_at": f"2026-05-11T1{i}:00:00+00:00",
+        })
+    leads = await store.list_lead_statuses()
+    # Apesar de 5 sets, apenas 1 entry (dedup por chave)
+    assert len(leads) == 1
+    assert leads[0]["phone"] == "111"

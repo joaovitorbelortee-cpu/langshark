@@ -907,6 +907,34 @@ async def follow_up_strategist_node(state: SalesState) -> dict[str, Any]:
         decision["razao"],
     )
 
+    # Grava snapshot pro painel Reconquista
+    from datetime import datetime, timedelta, timezone
+    now_utc = datetime.now(timezone.utc)
+    next_followup_at = None
+    if decision["agendar_minutos"] and decision["agendar_minutos"] > 0:
+        next_followup_at = (
+            now_utc + timedelta(minutes=decision["agendar_minutos"])
+        ).isoformat()
+    snapshot = {
+        "project_id": state.get("project_id") or "padrao",
+        "instance": instance,
+        "phone": phone,
+        "push_name": state.get("push_name", ""),
+        "temperatura": decision["temperatura"],
+        "razao": decision["razao"],
+        "abordagem": decision["abordagem"],
+        "agendar_minutos": decision["agendar_minutos"],
+        "killswitch_permanent": decision["killswitch_permanent"],
+        "attempts_made": attempts,
+        "last_decision_at": now_utc.isoformat(),
+        "next_followup_at": next_followup_at,
+        "intent": intent,
+    }
+    try:
+        await redis.set_lead_status(instance, phone, snapshot)
+    except Exception:  # noqa: BLE001
+        pass
+
     patch: dict[str, Any] = {
         "follow_up_strategy": decision,
         "follow_up_attempts": attempts,

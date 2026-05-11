@@ -3,62 +3,219 @@
 {% block page_title %}Reconquista{% endblock %}
 
 {% block content %}
-<section class="page">
+<section class="page" x-data="recoveryPage()" x-init="load()">
   <div class="page-head">
-    <span class="page-eyebrow">FOLLOW-UP AUTOMÁTICO</span>
+    <span class="page-eyebrow">FOLLOW-UP INTELIGENTE</span>
     <h2 class="page-title-large">Reconquista</h2>
-    <p class="page-subtitle">A IA decide a temperatura do lead e agenda follow-up via tag <code>[AGENDAR: N]</code>.</p>
+    <p class="page-subtitle">Agente analisa temperatura do lead via psicologia comportamental e decide cadência ideal.</p>
   </div>
 
   <div class="agent-meta" style="margin-bottom: 20px;">
     <div class="agent-meta-stats">
+      <span class="meta-chip">🧠 Strategist ativo</span>
       <span class="meta-chip">⚡ QStash agendador</span>
-      <span class="meta-chip meta-on">● Ativo</span>
+      <span class="meta-chip meta-on" x-text="'● ' + leads.length + ' leads rastreados'"></span>
+    </div>
+    <button class="btn btn-secondary" type="button" @click="load()" :disabled="loading">
+      <span x-show="!loading">↻ Atualizar</span>
+      <span x-show="loading">Carregando...</span>
+    </button>
+  </div>
+
+  <!-- Filtros -->
+  <div class="agent-meta" style="margin-bottom: 16px; padding: 12px 20px;">
+    <div class="agent-meta-stats" style="flex-wrap: wrap;">
+      <button class="meta-chip" :class="filter === '' ? 'meta-on' : ''" @click="filter = ''">Todos</button>
+      <button class="meta-chip" :class="filter === 'HOT' ? 'meta-on' : ''" @click="filter = 'HOT'">🔥 Hot</button>
+      <button class="meta-chip" :class="filter === 'WARM' ? 'meta-on' : ''" @click="filter = 'WARM'">🌡️ Warm</button>
+      <button class="meta-chip" :class="filter === 'COLD' ? 'meta-on' : ''" @click="filter = 'COLD'">❄️ Cold</button>
+      <button class="meta-chip" :class="filter === 'STOP' ? 'meta-on' : ''" @click="filter = 'STOP'">⛔ Stop</button>
+      <button class="meta-chip" :class="filter === 'SCHEDULED' ? 'meta-on' : ''" @click="filter = 'SCHEDULED'">📅 Scheduled</button>
     </div>
   </div>
 
-  <div class="section-grid">
-    <div class="section-card" style="cursor: default;">
-      <div class="section-card-head">
-        <div class="section-card-title">🔥 Lead Quente</div>
-        <span class="section-badge badge-filled">10-30 min</span>
+  <!-- Quadro explicativo de temperaturas (referência rápida) -->
+  <details style="margin-bottom: 20px;">
+    <summary style="cursor: pointer; color: var(--text-secondary); font-size: 13px; padding: 8px 0;">📚 Critérios de classificação</summary>
+    <div class="section-grid" style="margin-top: 12px;">
+      <div class="section-card" style="cursor: default;">
+        <div class="section-card-head">
+          <div class="section-card-title">🔥 HOT</div>
+          <span class="section-badge badge-filled">15–60 min</span>
+        </div>
+        <p class="section-preview">"manda o link", "vou pagar", escolheu plano. Commitment ou escassez.</p>
       </div>
-      <p class="section-preview">Engajado, perguntou preço, escolheu plano. Volta rápido pra manter o momentum.</p>
-    </div>
-    <div class="section-card" style="cursor: default;">
-      <div class="section-card-head">
-        <div class="section-card-title">😐 Lead Morno</div>
-        <span class="section-badge badge-filled">60-180 min</span>
+      <div class="section-card" style="cursor: default;">
+        <div class="section-card-head">
+          <div class="section-card-title">🌡️ WARM</div>
+          <span class="section-badge badge-filled">1–3 h</span>
+        </div>
+        <p class="section-preview">"vou pensar", "depois te falo". Valor ou reciprocidade.</p>
       </div>
-      <p class="section-preview">"Vou ver", "depois". Dá espaço de 1-3h, volta com ângulo diferente.</p>
-    </div>
-    <div class="section-card" style="cursor: default;">
-      <div class="section-card-head">
-        <div class="section-card-title">❄️ Lead Frio</div>
-        <span class="section-badge badge-filled">360-1440 min</span>
+      <div class="section-card" style="cursor: default;">
+        <div class="section-card-head">
+          <div class="section-card-title">❄️ COLD</div>
+          <span class="section-badge badge-filled">12–24 h</span>
+        </div>
+        <p class="section-preview">Sumiu, só visualizou. Valor puro sem pitch direto.</p>
       </div>
-      <p class="section-preview">Sumiu, só visualizou. Volta com valor (dica/conteúdo) — reciprocidade Cialdini.</p>
-    </div>
-    <div class="section-card" style="cursor: default;">
-      <div class="section-card-head">
-        <div class="section-card-title">🛑 KillSwitch</div>
-        <span class="section-badge badge-filled">Automático</span>
+      <div class="section-card" style="cursor: default;">
+        <div class="section-card-head">
+          <div class="section-card-title">⛔ STOP</div>
+          <span class="section-badge badge-filled">Killswitch</span>
+        </div>
+        <p class="section-preview">"para de mandar", xingou. Para permanente. Admin pode resetar.</p>
       </div>
-      <p class="section-preview">Se o lead responde antes do follow-up disparar, QStash callback identifica e cancela. Anti-spam.</p>
+      <div class="section-card" style="cursor: default;">
+        <div class="section-card-head">
+          <div class="section-card-title">📅 SCHEDULED</div>
+          <span class="section-badge badge-filled">Hora exata</span>
+        </div>
+        <p class="section-preview">"chego 17h", "amanhã de manhã". Bot agenda na hora absoluta.</p>
+      </div>
     </div>
+  </details>
+
+  <!-- Tabela de leads -->
+  <div x-show="!loading && filteredLeads.length === 0" class="empty-state">
+    <div class="empty-icon">🌊</div>
+    <h3>Nenhum lead rastreado ainda</h3>
+    <p>Quando o strategist analisar uma conversa, o snapshot aparece aqui.</p>
+  </div>
+
+  <div x-show="filteredLeads.length > 0" style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 12px; overflow: hidden;">
+    <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+      <thead>
+        <tr style="background: var(--bg-input); text-align: left;">
+          <th style="padding: 12px 14px; color: var(--text-muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;">Lead</th>
+          <th style="padding: 12px 14px; color: var(--text-muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;">Temperatura</th>
+          <th style="padding: 12px 14px; color: var(--text-muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;">Abordagem</th>
+          <th style="padding: 12px 14px; color: var(--text-muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;">Próximo Follow-up</th>
+          <th style="padding: 12px 14px; color: var(--text-muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;">Tentativas</th>
+          <th style="padding: 12px 14px; color: var(--text-muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;">Última decisão</th>
+          <th style="padding: 12px 14px;"></th>
+        </tr>
+      </thead>
+      <tbody>
+        <template x-for="lead in filteredLeads" :key="lead.instance + '_' + lead.phone">
+          <tr style="border-top: 1px solid var(--border-subtle);">
+            <td style="padding: 12px 14px;">
+              <div style="font-weight: 500;" x-text="lead.push_name || lead.phone"></div>
+              <div style="font-size: 11px; color: var(--text-muted); font-family: var(--font-mono);" x-text="lead.phone + ' @ ' + lead.instance"></div>
+            </td>
+            <td style="padding: 12px 14px;">
+              <span class="section-badge" :class="tempBadgeClass(lead.temperatura)" x-text="tempLabel(lead.temperatura)"></span>
+              <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;" x-text="lead.razao"></div>
+            </td>
+            <td style="padding: 12px 14px; color: var(--text-secondary);" x-text="lead.abordagem"></td>
+            <td style="padding: 12px 14px;">
+              <template x-if="lead.killswitch_permanent">
+                <span style="color: var(--danger); font-weight: 500;">⛔ KILLSWITCH</span>
+              </template>
+              <template x-if="!lead.killswitch_permanent && lead.next_followup_at">
+                <span x-text="formatNext(lead.next_followup_at, lead.agendar_minutos)"></span>
+              </template>
+              <template x-if="!lead.killswitch_permanent && !lead.next_followup_at">
+                <span style="color: var(--text-muted);">—</span>
+              </template>
+            </td>
+            <td style="padding: 12px 14px; text-align: center; font-variant-numeric: tabular-nums;">
+              <span :style="lead.attempts_made >= 4 ? 'color: var(--danger); font-weight: 600;' : ''" x-text="(lead.attempts_made || 0) + '/5'"></span>
+            </td>
+            <td style="padding: 12px 14px; color: var(--text-muted); font-size: 11px;" x-text="formatRelative(lead.last_decision_at)"></td>
+            <td style="padding: 12px 14px; text-align: right;">
+              <button x-show="lead.killswitch_permanent" class="btn btn-secondary" type="button" style="padding: 4px 10px; font-size: 11px;" @click="clearKillswitch(lead)">
+                Resetar
+              </button>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
   </div>
 
   <div class="cta-card" style="margin-top: 20px;">
     <div class="cta-content">
       <h3>Como funciona</h3>
-      <p>A IA emite tag <code>[AGENDAR: N]</code> ao final de cada resposta. QStash agenda HTTP callback após N minutos
-         pra <code>/api/trigger-followup</code> que dispara nova mensagem do bot.</p>
+      <p>Cada vez que o cliente manda mensagem, o <strong>strategist agent</strong> analisa contexto + histórico via psicologia Cialdini e decide:
+        temperatura, abordagem (commitment/valor/escassez/reciprocidade/social) e cadência ideal.
+        Após 5 tentativas sem resposta, o lead vira <strong>LOST</strong> (killswitch automático).</p>
     </div>
     <a class="btn btn-secondary" href="/admin/agent">Editar prompt →</a>
   </div>
-
-  <div class="page-foot-info">
-    <p>Edição da cadência fica na seção "Parâmetros" do prompt (página Agente).</p>
-  </div>
 </section>
+
+<script>
+function recoveryPage() {
+  return {
+    leads: [],
+    loading: false,
+    filter: '',
+
+    get filteredLeads() {
+      if (!this.filter) return this.leads;
+      return this.leads.filter(l => (l.temperatura || '').toUpperCase() === this.filter);
+    },
+
+    async load() {
+      this.loading = true;
+      try {
+        const r = await fetch('/api/admin/leads?limit=200');
+        this.leads = r.ok ? await r.json() : [];
+      } catch (e) {
+        this.leads = [];
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    tempLabel(t) {
+      const map = { HOT: '🔥 Hot', WARM: '🌡️ Warm', COLD: '❄️ Cold', STOP: '⛔ Stop', SCHEDULED: '📅 Scheduled' };
+      return map[t] || t || '—';
+    },
+
+    tempBadgeClass(t) {
+      if (t === 'HOT') return 'badge-filled';
+      if (t === 'WARM') return 'badge-filled';
+      if (t === 'COLD') return 'badge-empty';
+      if (t === 'STOP') return 'badge-empty';
+      return 'badge-filled';
+    },
+
+    formatNext(iso, minutes) {
+      if (!iso) return '—';
+      const dt = new Date(iso);
+      const diff = dt - new Date();
+      if (diff <= 0) return 'agora';
+      const m = Math.round(diff / 60000);
+      if (m < 60) return `em ${m} min`;
+      const h = Math.round(m / 60);
+      if (h < 24) return `em ${h} h`;
+      return `em ${Math.round(h/24)} dias`;
+    },
+
+    formatRelative(iso) {
+      if (!iso) return '—';
+      const dt = new Date(iso);
+      const diff = (new Date() - dt) / 1000;
+      if (diff < 60) return 'agora';
+      if (diff < 3600) return `${Math.round(diff/60)} min atrás`;
+      if (diff < 86400) return `${Math.round(diff/3600)} h atrás`;
+      return `${Math.round(diff/86400)} d atrás`;
+    },
+
+    async clearKillswitch(lead) {
+      if (!confirm(`Resetar killswitch e voltar a tentar contato com ${lead.push_name || lead.phone}?`)) return;
+      try {
+        const r = await fetch(`/api/admin/leads/${lead.instance}/${lead.phone}/killswitch`, { method: 'DELETE' });
+        if (!r.ok) throw new Error('falha');
+        showToast('Killswitch removido — bot voltará a tentar contato', 'success');
+        await this.load();
+      } catch (e) {
+        showToast('Falha: ' + e.message, 'error');
+      }
+    },
+  };
+}
+</script>
 {% endblock %}

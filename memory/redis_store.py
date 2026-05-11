@@ -194,6 +194,21 @@ class RedisStore:
             self._fallback[key] = (entry[0], now + ttl_s)
             return 1
 
+        if cmd == "LRANGE":
+            entry = self._fallback.get(parts[1])
+            if not entry or not isinstance(entry[0], list):
+                return []
+            try:
+                start = int(parts[2])
+                stop = int(parts[3])
+            except (TypeError, ValueError):
+                return list(entry[0])
+            lst = entry[0]
+            # Redis semantics: stop=-1 → todo o resto, inclusivo
+            if stop == -1:
+                return list(lst[start:])
+            return list(lst[start:stop + 1])
+
         return None
 
     # ────────────────────────────────────────────────────────────
@@ -363,3 +378,64 @@ class RedisStore:
     async def reset_followup_attempts(self, instance: str, phone: str) -> None:
         """Lead respondeu → zera contador (próximo follow-up vai do começo)."""
         await self._cmd("DEL", self._attempts_key(instance, phone))
+
+    # ────────────────────────────────────────────────────────────
+    # Lead status registry — alimentado pelo strategist, lido pelo painel
+    # ────────────────────────────────────────────────────────────
+
+    _LEAD_STATUS_INDEX = "lead_status:index"
+    _LEAD_STATUS_TTL = 60 * 60 * 24 * 60  # 60 dias
+
+    def _lead_status_key(self, instance: str, phone: str) -> str:
+        return f"lead_status:{instance}:{phone}"
+
+    async def set_lead_status(
+        self,
+        instance: str,
+        phone: str,
+        status: dict[str, Any],
+    ) -> None:
+        """Grava snapshot do lead pra painel. TTL 60d."""
+        key = self._lead_status_key(instance, phone)
+        await self._cmd("SET", key, json.dumps(status), "EX", str(self._LEAD_STATUS_TTL))
+        # Index de keys (permite listar sem SCAN — Upstash REST não tem SCAN bom)
+        await self._cmd("LPUSH", self._LEAD_STATUS_INDEX, key)
+        await self._cmd("EXPIRE", self._LEAD_STATUS_INDEX, str(self._LEAD_STATUS_TTL))
+
+    async def get_lead_status(self, instance: str, phone: str) -> dict[str, Any] | None:
+        raw = await self._cmd("GET", self._lead_status_key(instance, phone))
+        if not raw:
+            return None
+        try:
+            return json.loads(raw) if isinstance(raw, str) else None
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+    async def list_lead_statuses(self, limit: int = 200) -> list[dict[str, Any]]:
+        """
+        Lista snapshots de leads. Dedup via key, retorna mais recentes primeiro.
+        """
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        # LRANGE 0 -1 retorna toda a lista
+        keys_raw = await self._cmd("LRANGE", self._LEAD_STATUS_INDEX, "0", "-1")
+        if not isinstance(keys_raw, list):
+            return []
+        for k in keys_raw:
+            if not isinstance(k, str) or k in seen:
+                continue
+            seen.add(k)
+            raw = await self._cmd("GET", k)
+            if not raw:
+                continue
+            try:
+                obj = json.loads(raw) if isinstance(raw, str) else None
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(obj, dict):
+                out.append(obj)
+            if len(out) >= limit:
+                break
+        # ordena por last_decision_at desc
+        out.sort(key=lambda x: x.get("last_decision_at", ""), reverse=True)
+        return out

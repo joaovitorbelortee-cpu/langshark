@@ -501,3 +501,48 @@ async def delete_product(
     ok = await _products_repo.delete(product_id)
     await _audit(user, "product.delete", "product", product_id)
     return {"ok": ok}
+
+
+# ────────────────────────────────────────────────────────────────────
+# Leads — Strategist snapshots por (instance, phone) — Reconquista
+# ────────────────────────────────────────────────────────────────────
+
+@admin_router.get("/leads")
+async def list_leads(
+    user: Annotated[dict[str, Any], Depends(require_admin)],
+    limit: int = 200,
+    project_id: str | None = None,
+    temperatura: str | None = None,
+) -> list[dict[str, Any]]:
+    """Lista snapshots do strategist por lead. Filtros opcionais: project_id, temperatura."""
+    from memory.redis_store import RedisStore
+    redis = RedisStore()
+    rows = await redis.list_lead_statuses(limit=limit)
+    # Filtro multi-tenant
+    allowed = user.get("project_ids") or []
+    if allowed:
+        rows = [r for r in rows if r.get("project_id") in allowed]
+    if project_id:
+        rows = [r for r in rows if r.get("project_id") == project_id]
+    if temperatura:
+        rows = [r for r in rows if (r.get("temperatura") or "").upper() == temperatura.upper()]
+    return rows
+
+
+@admin_router.delete("/leads/{instance}/{phone}/killswitch")
+async def clear_lead_killswitch(
+    instance: str,
+    phone: str,
+    user: Annotated[dict[str, Any], Depends(require_admin)],
+) -> dict[str, Any]:
+    """Admin override: limpa killswitch + zera attempts (volta a tentar contato)."""
+    from memory.redis_store import RedisStore
+    redis = RedisStore()
+    await redis.reset_followup_attempts(instance, phone)
+    status = await redis.get_lead_status(instance, phone)
+    if status:
+        status["killswitch_permanent"] = False
+        status["attempts_made"] = 0
+        await redis.set_lead_status(instance, phone, status)
+    await _audit(user, "lead.killswitch_cleared", "lead", f"{instance}/{phone}")
+    return {"ok": True, "instance": instance, "phone": phone}
