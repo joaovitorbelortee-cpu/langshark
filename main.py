@@ -727,6 +727,115 @@ async def health() -> dict:
     }
 
 
+@app.get("/webhook/self-check")
+async def webhook_self_check(request: Request) -> dict:
+    """
+    Diagnóstico self-service — auth via WEBHOOK_SECRET (sem login admin).
+
+    Lista todas instances Evolution, mostra: status conexão + webhook URL atual
+    + se URL bate com a expected. Auto-fixa instances com webhook errado/ausente
+    se ?fix=1 query param.
+
+    Use:
+      curl -H "apikey: $WEBHOOK_SECRET" \\
+        https://app.up.railway.app/webhook/self-check
+      curl -H "apikey: $WEBHOOK_SECRET" \\
+        https://app.up.railway.app/webhook/self-check?fix=1
+    """
+    _check_auth(request)
+    base_url = (os.getenv("EVOLUTION_API_URL") or "").rstrip("/")
+    api_key = os.getenv("EVOLUTION_API_KEY") or ""
+    if not base_url or not api_key:
+        return {"ok": False, "error": "EVOLUTION_API_URL / EVOLUTION_API_KEY missing"}
+
+    pub_raw = (os.getenv("PUBLIC_BASE_URL") or os.getenv("RAILWAY_PUBLIC_DOMAIN") or "").strip()
+    if pub_raw and not pub_raw.startswith("http"):
+        pub_raw = "https://" + pub_raw
+    pub_url = pub_raw.rstrip("/")
+    expected_webhook = f"{pub_url}/webhook/evolution" if pub_url else None
+    fix = request.query_params.get("fix") == "1"
+
+    import httpx
+    report: dict[str, Any] = {
+        "ok": True,
+        "expected_webhook": expected_webhook,
+        "fix_mode": fix,
+        "instances": [],
+    }
+    secret = (os.getenv("WEBHOOK_SECRET") or "").strip()
+
+    async with httpx.AsyncClient(timeout=15.0) as c:
+        try:
+            r = await c.get(f"{base_url}/instance/fetchInstances", headers={"apikey": api_key})
+            r.raise_for_status()
+            payload = r.json() or []
+        except httpx.HTTPError as e:
+            return {"ok": False, "error": f"Evolution unreachable: {e}"[:200]}
+
+        for item in payload:
+            inst = item.get("instance") if isinstance(item, dict) and "instance" in item else item
+            if not isinstance(inst, dict):
+                continue
+            name = inst.get("instanceName") or inst.get("name") or ""
+            status = inst.get("status") or inst.get("state") or "unknown"
+            info: dict[str, Any] = {"name": name, "status": status}
+
+            # Webhook config atual
+            try:
+                wr = await c.get(f"{base_url}/webhook/find/{name}", headers={"apikey": api_key})
+                if wr.is_success and wr.content:
+                    wd = wr.json() or {}
+                    info["webhook_url"] = wd.get("url") or ""
+                    info["webhook_enabled"] = wd.get("enabled", False)
+                else:
+                    info["webhook_url"] = ""
+                    info["webhook_enabled"] = False
+            except httpx.HTTPError as e:
+                info["webhook_url"] = f"<error: {str(e)[:60]}>"
+
+            info["webhook_match"] = bool(
+                expected_webhook
+                and info.get("webhook_url")
+                and info["webhook_url"].rstrip("/") == expected_webhook.rstrip("/")
+                and info.get("webhook_enabled")
+            )
+
+            # Auto-fix se ?fix=1 e webhook errado
+            if fix and not info["webhook_match"] and expected_webhook and secret:
+                try:
+                    fr = await c.post(
+                        f"{base_url}/webhook/set/{name}",
+                        headers={"apikey": api_key, "Content-Type": "application/json"},
+                        json={
+                            "webhook": {
+                                "url": expected_webhook,
+                                "enabled": True,
+                                "webhookByEvents": False,
+                                "webhookBase64": True,
+                                "headers": {"apikey": secret, "Content-Type": "application/json"},
+                                "events": ["MESSAGES_UPSERT", "MESSAGES_UPDATE", "CONNECTION_UPDATE", "SEND_MESSAGE"],
+                            }
+                        },
+                    )
+                    info["fix_applied"] = fr.is_success
+                    if not fr.is_success:
+                        info["fix_error"] = fr.text[:200]
+                except httpx.HTTPError as e:
+                    info["fix_applied"] = False
+                    info["fix_error"] = str(e)[:200]
+
+            report["instances"].append(info)
+
+    # Resumo no topo
+    report["summary"] = {
+        "total": len(report["instances"]),
+        "connected": sum(1 for i in report["instances"] if str(i.get("status", "")).lower() in ("open", "connected")),
+        "webhook_ok": sum(1 for i in report["instances"] if i.get("webhook_match")),
+        "needs_fix": sum(1 for i in report["instances"] if not i.get("webhook_match")),
+    }
+    return report
+
+
 if __name__ == "__main__":
     import uvicorn
 
