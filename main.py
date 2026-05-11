@@ -43,6 +43,7 @@ log = logging.getLogger("bot-vendas")
 # ────────────────────────────────────────────────────────────────────
 
 _checkpointer_provider: CheckpointerProvider | None = None
+_store_provider: Any | None = None  # StoreProvider, lazy import pra evitar erro se módulo faltar
 _graph_app: Any | None = None
 _worker_task: asyncio.Task[Any] | None = None
 _worker_stop_evt: asyncio.Event = asyncio.Event()
@@ -88,11 +89,26 @@ def _calc_inter_lead_delay(qsize: int) -> float:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global _checkpointer_provider, _graph_app, _worker_task
+    global _checkpointer_provider, _store_provider, _graph_app, _worker_task
     _checkpointer_provider = CheckpointerProvider()
     cp = await _checkpointer_provider.shared()
-    _graph_app = build_graph(checkpointer=cp)
-    log.info("[startup] grafo compilado (checkpointer=%s)", _checkpointer_provider.kind)
+
+    # Store opcional: cross-thread long-term memory (lead_facts, prefs).
+    # Mesmo Redis URL do checkpointer. Se falhar, fallback InMemoryStore.
+    store = None
+    try:
+        from agent.store import StoreProvider, set_shared_store
+        _store_provider = StoreProvider()
+        store = await _store_provider.shared()
+        set_shared_store(store)  # nós acessam via get_shared_store()
+        log.info("[startup] store inicializado (%s)", _store_provider.kind)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[startup] store falhou (%s) — graph sem store", exc)
+
+    _graph_app = build_graph(checkpointer=cp, store=store)
+    log.info("[startup] grafo compilado (checkpointer=%s, store=%s)",
+             _checkpointer_provider.kind,
+             _store_provider.kind if _store_provider else "none")
 
     # Sobe worker FIFO — drena queue Redis serialmente, 1 mensagem por vez,
     # anti-ban WhatsApp (paralelismo dispararia N envios simultâneos).
@@ -112,6 +128,13 @@ async def lifespan(_app: FastAPI):
                 pass
         if _checkpointer_provider:
             await _checkpointer_provider.aclose()
+        if _store_provider:
+            try:
+                from agent.store import set_shared_store
+                set_shared_store(None)
+                await _store_provider.aclose()
+            except Exception:  # noqa: BLE001
+                pass
         _graph_app = None
 
 
@@ -721,6 +744,7 @@ async def health() -> dict:
         "redis": "remote" if redis.remote_enabled else "local-fallback",
         "evolution": bool(os.getenv("EVOLUTION_API_URL")),
         "checkpointer": _checkpointer_provider.kind if _checkpointer_provider else "uninit",
+        "store": _store_provider.kind if _store_provider else "none",
         "qstash": qstash.enabled,
         "queue_size": qsize,
         "worker_alive": worker_alive,

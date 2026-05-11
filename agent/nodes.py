@@ -439,10 +439,15 @@ async def detect_intent_node(state: SalesState) -> dict[str, Any]:
 
 async def lead_memory_node(state: SalesState) -> dict[str, Any]:
     """
-    Mantém estado estruturado do lead (plataforma/plano/estágio/objeções) em Redis.
+    Mantém estado estruturado do lead (plataforma/plano/estágio/objeções).
 
-    Roda em TODO turn inbound. Lê fatos existentes, atualiza com histórico atual
-    via LLM extraction leve, salva, injeta no state pra especialistas usarem.
+    Storage priority:
+      1. LangGraph Store (cross-thread long-term, namespace=(project_id, phone))
+         — acessado via agent.store.get_shared_store() (set no lifespan)
+      2. Redis JSON manual (fallback compat)
+
+    Roda em TODO turn inbound. Lê facts existentes, atualiza com histórico atual
+    via LLM extraction leve, persiste, injeta no state pra especialistas usarem.
 
     Pula em follow_up turn (bot iniciando — sem nova msg do cliente pra extrair).
     """
@@ -450,18 +455,37 @@ async def lead_memory_node(state: SalesState) -> dict[str, Any]:
         return {}
 
     from agent.lead_memory import empty_facts, extract_facts
+    from agent.store import get_shared_store, lead_namespace
 
     redis = get_redis()
+    store = get_shared_store()
     instance = state.get("instance_name", "")
     phone = state.get("phone", "")
+    project_id = state.get("project_id", "") or "padrao"
+    ns = lead_namespace(project_id, phone)
 
-    # Lê facts existentes (lead pode já ter histórico de turnos passados)
-    try:
-        current_facts = await redis.get_lead_facts(instance, phone) or empty_facts()
-    except Exception:  # noqa: BLE001
+    # ──── READ ────
+    current_facts: dict[str, Any] | None = None
+    if store is not None:
+        try:
+            item = await store.aget(ns, "facts")
+            if item is not None:
+                value = getattr(item, "value", None)
+                if value is None and hasattr(item, "get"):
+                    value = item.get("value")
+                if isinstance(value, dict):
+                    current_facts = dict(value)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[lead_facts] store.aget falhou (%s) — fallback Redis", exc)
+    if current_facts is None:
+        try:
+            current_facts = await redis.get_lead_facts(instance, phone)
+        except Exception:  # noqa: BLE001
+            current_facts = None
+    if current_facts is None:
         current_facts = empty_facts()
 
-    # Atualiza via LLM extraction com histórico ATÉ AGORA
+    # ──── EXTRACT ────
     try:
         new_facts = await extract_facts(
             messages=state.get("messages") or [],
@@ -471,19 +495,28 @@ async def lead_memory_node(state: SalesState) -> dict[str, Any]:
         log.warning("[lead_facts] extract erro: %s — mantém current", exc)
         new_facts = current_facts
 
-    # Persiste apenas se mudou (evita writes inúteis)
-    try:
-        if new_facts != current_facts:
-            await redis.set_lead_facts(instance, phone, new_facts)
-            log.info(
-                "[lead_facts] %s/%s update: plataforma=%s estagio=%s plano=%s",
-                instance, phone,
-                new_facts.get("plataforma"),
-                new_facts.get("estagio"),
-                new_facts.get("plano_interesse"),
-            )
-    except Exception as exc:  # noqa: BLE001
-        log.warning("[lead_facts] persist erro: %s", exc)
+    # ──── WRITE (apenas se mudou) ────
+    if new_facts != current_facts:
+        wrote_store = False
+        if store is not None:
+            try:
+                await store.aput(ns, "facts", new_facts)
+                wrote_store = True
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[lead_facts] store.aput falhou (%s) — escreve Redis", exc)
+        if not wrote_store:
+            try:
+                await redis.set_lead_facts(instance, phone, new_facts)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[lead_facts] persist Redis erro: %s", exc)
+        log.info(
+            "[lead_facts] %s/%s update: plataforma=%s estagio=%s plano=%s store=%s",
+            instance, phone,
+            new_facts.get("plataforma"),
+            new_facts.get("estagio"),
+            new_facts.get("plano_interesse"),
+            wrote_store,
+        )
 
     return {"lead_facts": new_facts}
 

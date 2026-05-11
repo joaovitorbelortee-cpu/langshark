@@ -131,8 +131,14 @@ def _route_after_supervisor(state: SalesState) -> str:
     return "strategist_path"
 
 
-def build_graph(checkpointer: Any | None = None):
-    """Compila o grafo. Retorna um Runnable pronto pra ainvoke."""
+def build_graph(checkpointer: Any | None = None, store: Any | None = None):
+    """Compila o grafo. Retorna um Runnable pronto pra ainvoke.
+
+    Args:
+        checkpointer: thread-level state (BaseCheckpointSaver).
+        store: cross-thread long-term memory (BaseStore). Opcional.
+            Quando setado, nós podem usar via runtime.store.aput/aget/asearch.
+    """
     g: StateGraph = StateGraph(SalesState)
 
     g.add_node("tenant_resolver", tenant_resolver_node)
@@ -215,17 +221,20 @@ def build_graph(checkpointer: Any | None = None):
     g.add_edge("persist", "send")
     g.add_edge("send", END)
 
+    compile_kwargs: dict[str, Any] = {}
     if checkpointer is not None:
-        return g.compile(checkpointer=checkpointer)
-    return g.compile()
+        compile_kwargs["checkpointer"] = checkpointer
+    if store is not None:
+        compile_kwargs["store"] = store
+    return g.compile(**compile_kwargs)
 
 
 _graph: Any | None = None
 
 
-def get_graph(checkpointer: Any | None = None):
-    """Singleton — compila uma vez por processo (opcionalmente com checkpointer)."""
+def get_graph(checkpointer: Any | None = None, store: Any | None = None):
+    """Singleton — compila uma vez por processo (opcionalmente com checkpointer/store)."""
     global _graph
     if _graph is None:
-        _graph = build_graph(checkpointer=checkpointer)
+        _graph = build_graph(checkpointer=checkpointer, store=store)
     return _graph
