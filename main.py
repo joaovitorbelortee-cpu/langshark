@@ -61,12 +61,15 @@ QUEUE_POLL_INTERVAL_S = float(os.getenv("QUEUE_POLL_INTERVAL_S", "0.5"))
 #   carga baixa (≤2)   → 1–3 min  (cliente espera pouco)
 #   carga média (3–5)  → 1–4 min  (default)
 #   carga alta (>5)    → 2–5 min  (humano "ocupado" demora mais)
+# ON por default mas ranges CURTOS — antes 1-5min era demais.
+# Agora 5-45s segundo carga (mantém anti-spam humano sem matar volume).
 INTER_LEAD_DELAY_ENABLED = os.getenv("INTER_LEAD_DELAY_ENABLED", "1") == "1"
 INTER_LEAD_LOW_THRESHOLD = int(os.getenv("INTER_LEAD_LOW_THRESHOLD", "2"))
 INTER_LEAD_HIGH_THRESHOLD = int(os.getenv("INTER_LEAD_HIGH_THRESHOLD", "5"))
-INTER_LEAD_LOW_RANGE_S = (60, 180)     # 1-3 min
-INTER_LEAD_NORMAL_RANGE_S = (60, 240)  # 1-4 min
-INTER_LEAD_HIGH_RANGE_S = (120, 300)   # 2-5 min
+# Ranges reduzidos drasticamente — antes 1-5min, agora 5-30s default
+INTER_LEAD_LOW_RANGE_S = (5, 15)       # 5-15s carga baixa
+INTER_LEAD_NORMAL_RANGE_S = (10, 30)   # 10-30s carga média
+INTER_LEAD_HIGH_RANGE_S = (15, 45)     # 15-45s carga alta
 
 
 def _calc_inter_lead_delay(qsize: int) -> float:
@@ -350,6 +353,9 @@ async def webhook(request: Request) -> dict:
         or os.getenv("EVOLUTION_INSTANCE", "botzap")
     )
 
+    # Log TODO webhook recebido — diagnóstico volume
+    log.info("[webhook] event=%s instance=%s", event, instance)
+
     if event == "connection.update":
         state = (body.get("data") or {}).get("state") or body.get("state")
         log.info("[conn] %s state=%s", instance, state)
@@ -359,6 +365,7 @@ async def webhook(request: Request) -> dict:
         return {"ok": True, "skipped": "presence"}
 
     if event != "messages.upsert":
+        log.info("[webhook] skip event=%s", event)
         return {"ok": True, "skipped": event}
 
     data = body.get("data") or {}
@@ -366,25 +373,30 @@ async def webhook(request: Request) -> dict:
     message = data.get("message") or {}
 
     if key.get("fromMe"):
+        log.info("[webhook] skip fromMe %s", instance)
         return {"ok": True, "skipped": "fromMe"}
 
     remote_jid: str = key.get("remoteJid") or ""
     if remote_jid.endswith("@g.us") or "@broadcast" in remote_jid:
+        log.info("[webhook] skip group/broadcast jid=%s", remote_jid)
         return {"ok": True, "skipped": "group/broadcast"}
 
     phone = remote_jid.replace("@s.whatsapp.net", "").replace("@g.us", "")
     if not re.fullmatch(r"\d{10,15}", phone or ""):
+        log.info("[webhook] skip invalid phone=%s jid=%s", phone, remote_jid)
         return {"ok": True, "skipped": "invalid phone"}
 
     text = _extract_text(message)
     media = _extract_media(message, data)
     if not text and not media:
+        log.info("[webhook] skip no content phone=%s", phone)
         return {"ok": True, "skipped": "no content"}
 
     message_id = key.get("id") or ""
     if message_id:
         first = await redis.mark_message_processed(instance, phone, message_id)
         if not first:
+            log.info("[webhook] skip duplicate phone=%s msg_id=%s", phone, message_id)
             return {"ok": True, "skipped": "duplicate", "messageId": message_id}
 
     project_id_hint = req.query_params.get("project_id") or ""
@@ -572,7 +584,7 @@ async def _process_queued(payload: dict[str, Any]) -> None:
 
     # Lock per (instance, phone) — protege contra concorrência caso worker
     # restart deixe entry duplicada.
-    got_lock = await redis.acquire_lock(instance, phone, ttl_seconds=120)
+    got_lock = await redis.acquire_lock(instance, phone, ttl_seconds=60)
     if not got_lock:
         # Lock ainda detido — re-enqueue no fim, processa outro lead enquanto isso.
         log.info("[queue] lock_held %s/%s — re-enqueue", instance, phone)

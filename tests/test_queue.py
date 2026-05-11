@@ -140,36 +140,36 @@ async def test_dequeue_malformed_returns_none():
 # ────────────────────────────────────────────────────────────────────
 
 def test_inter_lead_delay_low_load(monkeypatch):
-    """Queue pequena → delay curto (1-3 min). Cliente espera pouco."""
+    """Queue pequena → delay 5-15s (volume alto não pode esperar)."""
     monkeypatch.setenv("WEBHOOK_SECRET", "x" * 32)
     from main import _calc_inter_lead_delay
     for _ in range(20):
         d = _calc_inter_lead_delay(qsize=0)
-        assert 60 <= d <= 180, f"qsize=0 esperado 60-180, got {d}"
+        assert 5 <= d <= 15, f"qsize=0 esperado 5-15, got {d}"
         d = _calc_inter_lead_delay(qsize=2)
-        assert 60 <= d <= 180, f"qsize=2 esperado 60-180, got {d}"
+        assert 5 <= d <= 15, f"qsize=2 esperado 5-15, got {d}"
 
 
 def test_inter_lead_delay_normal_load(monkeypatch):
-    """Queue média → delay padrão (1-4 min)."""
+    """Queue média → delay 10-30s."""
     monkeypatch.setenv("WEBHOOK_SECRET", "x" * 32)
     from main import _calc_inter_lead_delay
     for _ in range(20):
         d = _calc_inter_lead_delay(qsize=3)
-        assert 60 <= d <= 240, f"qsize=3 esperado 60-240, got {d}"
+        assert 10 <= d <= 30, f"qsize=3 esperado 10-30, got {d}"
         d = _calc_inter_lead_delay(qsize=5)
-        assert 60 <= d <= 240, f"qsize=5 esperado 60-240, got {d}"
+        assert 10 <= d <= 30, f"qsize=5 esperado 10-30, got {d}"
 
 
 def test_inter_lead_delay_high_load(monkeypatch):
-    """Queue grande → delay longo (2-5 min). Humano 'ocupado' demora mais."""
+    """Queue grande → delay 15-45s."""
     monkeypatch.setenv("WEBHOOK_SECRET", "x" * 32)
     from main import _calc_inter_lead_delay
     for _ in range(20):
         d = _calc_inter_lead_delay(qsize=6)
-        assert 120 <= d <= 300, f"qsize=6 esperado 120-300, got {d}"
+        assert 15 <= d <= 45, f"qsize=6 esperado 15-45, got {d}"
         d = _calc_inter_lead_delay(qsize=20)
-        assert 120 <= d <= 300, f"qsize=20 esperado 120-300, got {d}"
+        assert 15 <= d <= 45, f"qsize=20 esperado 15-45, got {d}"
 
 
 def test_inter_lead_delay_randomized(monkeypatch):

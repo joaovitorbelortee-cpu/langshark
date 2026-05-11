@@ -189,9 +189,10 @@ def _split_smart(text: str, max_chars: int) -> list[str]:
 
 def chunk_for_whatsapp(
     text: str,
-    max_bubbles: int = 3,
-    max_chars: int = 140,
+    max_bubbles: int = 4,
+    max_chars: int = 110,
     min_chars: int = 25,
+    force_sentence_split: bool = True,
 ) -> list[str]:
     """
     Quebra texto em bolhas humanizadas pro WhatsApp.
@@ -199,11 +200,13 @@ def chunk_for_whatsapp(
     Estratégia:
       1. Protege URLs, chaves PIX, telefones, R$ amounts, emails (nunca quebra dentro)
       2. Split em parágrafos (\\n\\n)
-      3. Cada parágrafo grande → split por sentença → por conectivos → por vírgulas
-      4. Junta bolhas minúsculas (<min_chars) com vizinha
-      5. Limita a max_bubbles (sobra concatenada na última)
+      3. Force sentence split — se há 2+ frases E texto > 50 chars, split por frase
+         mesmo se cabe em max_chars (mais humano).
+      4. Cada parágrafo grande → split por sentença → conectivos → vírgulas
+      5. Junta bolhas minúsculas (<min_chars) com vizinha
+      6. Limita a max_bubbles (sobra concatenada na última)
 
-    Defaults: 3 bolhas × 140 chars — sensação humana, sem fragmentar demais.
+    Defaults agressivos: 4 bolhas × 110 chars — fragmenta mais pra parecer humano.
     """
     if not text:
         return []
@@ -217,9 +220,23 @@ def chunk_for_whatsapp(
     # 2. Split em parágrafos
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", safe) if p.strip()]
 
-    # 3. Cada parágrafo → smart split
+    # 3. Cada parágrafo → smart split (com force_sentence_split)
     bubbles: list[str] = []
     for p in paragraphs:
+        if force_sentence_split and len(p) > 50:
+            # Força split por sentença mesmo se cabe em max_chars
+            sentences = re.split(r"(?<=[.!?])\s+", p)
+            if len(sentences) >= 2:
+                # Cada sentença vira candidata a bolha (será merge se < min_chars)
+                for s in sentences:
+                    s = s.strip()
+                    if s:
+                        # Se sentença muito grande, ainda split por conectivos
+                        if len(s) > max_chars:
+                            bubbles.extend(_split_smart(s, max_chars))
+                        else:
+                            bubbles.append(s)
+                continue
         bubbles.extend(_split_smart(p, max_chars))
 
     # 4. Merge bolhas curtas demais (< min_chars) com vizinha
