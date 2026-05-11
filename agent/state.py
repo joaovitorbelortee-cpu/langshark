@@ -84,3 +84,6 @@ class SalesState(TypedDict):
     # Follow-up Strategist (preenchido por follow_up_strategist_node)
     follow_up_strategy: NotRequired[dict[str, Any]]   # {temperatura, razao, abordagem, ...}
     follow_up_attempts: NotRequired[int]              # nº de followups já enviados sem resposta
+
+    # Lead Memory (preenchido por lead_memory_node) — anti-amnésia
+    lead_facts: NotRequired[dict[str, Any]]           # {plataforma, nome, plano_interesse, estagio, ...}

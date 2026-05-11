@@ -44,6 +44,7 @@ from agent.nodes import (
     follow_up_node,
     follow_up_strategist_node,
     greeting_node,
+    lead_memory_node,
     load_history_node,
     load_system_prompt_node,
     objection_node,
@@ -62,22 +63,24 @@ def _route_after_intent(state: SalesState) -> str:
     intent = state.get("intent", "outros")
     if intent == "comprou":
         return "persist"
+    # Verifica se bot já falou em algum turno passado → indica conversa em andamento
+    msgs = state.get("messages") or []
+    bot_already_spoke = any(getattr(m, "type", "") == "ai" for m in msgs)
     if intent == "saudacao":
-        # Conta msgs do cliente no histórico — se já teve conversa, NÃO é saudação inicial.
-        # "eae" depois de 5 turnos = retomada, não primeiro contato.
-        # Roteia pra respond_path: LLM vê histórico completo + responde no contexto.
-        msgs = state.get("messages") or []
-        user_msgs = sum(1 for m in msgs if getattr(m, "type", "") == "human")
-        # Inclui a msg atual (já adicionada por load_history_node)
-        if user_msgs > 1:
+        # Bot já falou? Conversa em andamento, NÃO saudação inicial → respond_path
+        if bot_already_spoke:
             return "respond_path"
         return "greeting"
     if intent == "objecao":
         return "objection"
     if intent == "follow_up":
+        # Follow-up MAS bot nunca falou? trata como saudação primeiro
+        if not bot_already_spoke and not state.get("user_message"):
+            return "greeting"
         return "follow_up"
     if intent == "intencao_compra":
         return "close_path"
+    # "outros" + bot já falou = retomada/continuação, vai pra respond
     return "respond_path"
 
 
@@ -117,6 +120,7 @@ def build_graph(checkpointer: Any | None = None):
     g.add_node("summarize", summarize_node)
     g.add_node("vision", vision_node)
     g.add_node("detect_intent", detect_intent_node)
+    g.add_node("lead_memory", lead_memory_node)
     g.add_node("retrieve_for_close", retrieve_catalog_node)
     g.add_node("retrieve_for_respond", retrieve_catalog_node)
     g.add_node("close_sale", close_sale_node)
@@ -141,8 +145,10 @@ def build_graph(checkpointer: Any | None = None):
     )
     g.add_edge("vision", "detect_intent")
 
+    # detect_intent → lead_memory (extrai fatos) → especialista
+    g.add_edge("detect_intent", "lead_memory")
     g.add_conditional_edges(
-        "detect_intent",
+        "lead_memory",
         _route_after_intent,
         {
             "persist": "persist",

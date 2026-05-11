@@ -284,15 +284,25 @@ def _build_system_prompt(
     flows_block: str = "",
     base_prompt: str | None = None,
     specialist_focus: str = "",
+    lead_facts: dict[str, Any] | None = None,
 ) -> str:
     """
-    Compõe system prompt = base (Game Pass etc) + foco do especialista + memória + RAG + fluxos.
+    Compõe system prompt = base + foco + lead_facts (CRÍTICO anti-amnésia) +
+    summary + RAG + flows.
 
-    base_prompt: SALES_SYSTEM dinâmico do state (padrão SALES_SYSTEM constante).
-    specialist_focus: bloco que especialista (greeting/objection/etc) acrescenta como FOCO,
-                      sem reescrever as regras gerais.
+    lead_facts: dict estruturado {plataforma, nome, plano_interesse, objecoes, estagio, ...}
+                Renderizado como bloco <lead_conhecido> que instrui bot a NÃO
+                reperguntar dados conhecidos.
     """
     prompt = base_prompt if base_prompt else SALES_SYSTEM
+
+    # Lead facts vem ANTES do specialist_focus pra prevenir override do prompt.
+    if lead_facts:
+        from agent.lead_memory import format_for_prompt
+        facts_block = format_for_prompt(lead_facts)
+        if facts_block:
+            prompt += "\n\n" + facts_block
+
     if specialist_focus:
         prompt += "\n\n<foco_deste_turno>\n" + specialist_focus + "\n</foco_deste_turno>"
     if summary:
@@ -363,10 +373,10 @@ async def detect_intent_node(state: SalesState) -> dict[str, Any]:
     if not user_msg.strip():
         return {"intent": "outros"}
 
-    # Pega últimas 8 msgs do histórico (excluindo a current — última no array)
+    # Pega últimas 12 msgs do histórico (excluindo a current — última no array)
     msgs = state.get("messages") or []
     # state["messages"] inclui a current user_msg como última. Pega anteriores.
-    prior = msgs[:-1][-8:] if len(msgs) > 1 else []
+    prior = msgs[:-1][-12:] if len(msgs) > 1 else []
 
     convo_lines: list[str] = []
     for m in prior:
@@ -398,13 +408,70 @@ async def detect_intent_node(state: SalesState) -> dict[str, Any]:
     )
     intent: Intent = raw if raw in valid else "outros"
 
-    # Salvaguarda redundante: se classificou saudacao mas há histórico, força follow_up.
-    # Cobre caso edge onde LLM ignorou a regra crítica do prompt.
-    if intent == "saudacao" and len(prior) >= 2:
-        log.info("[intent] downgrade saudacao→follow_up: %d msgs no histórico", len(prior))
+    # Salvaguarda redundante: se classificou saudacao mas JÁ HOUVE qualquer turno
+    # do bot, força follow_up. Anti-amnésia agressivo — 1 msg do bot = conversa
+    # iniciada, não saudação.
+    bot_already_spoke = any(getattr(m, "type", "") == "ai" for m in prior)
+    if intent == "saudacao" and bot_already_spoke:
+        log.info("[intent] downgrade saudacao→follow_up: bot já falou no histórico")
         intent = "follow_up"
 
     return {"intent": intent}
+
+
+# ────────────────────────────────────────────────────────────────────
+# Nó: lead_memory (extrai fatos estruturados pra anti-amnésia)
+# ────────────────────────────────────────────────────────────────────
+
+async def lead_memory_node(state: SalesState) -> dict[str, Any]:
+    """
+    Mantém estado estruturado do lead (plataforma/plano/estágio/objeções) em Redis.
+
+    Roda em TODO turn inbound. Lê fatos existentes, atualiza com histórico atual
+    via LLM extraction leve, salva, injeta no state pra especialistas usarem.
+
+    Pula em follow_up turn (bot iniciando — sem nova msg do cliente pra extrair).
+    """
+    if state.get("intent") == "follow_up":
+        return {}
+
+    from agent.lead_memory import empty_facts, extract_facts
+
+    redis = get_redis()
+    instance = state.get("instance_name", "")
+    phone = state.get("phone", "")
+
+    # Lê facts existentes (lead pode já ter histórico de turnos passados)
+    try:
+        current_facts = await redis.get_lead_facts(instance, phone) or empty_facts()
+    except Exception:  # noqa: BLE001
+        current_facts = empty_facts()
+
+    # Atualiza via LLM extraction com histórico ATÉ AGORA
+    try:
+        new_facts = await extract_facts(
+            messages=state.get("messages") or [],
+            current_facts=current_facts,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[lead_facts] extract erro: %s — mantém current", exc)
+        new_facts = current_facts
+
+    # Persiste apenas se mudou (evita writes inúteis)
+    try:
+        if new_facts != current_facts:
+            await redis.set_lead_facts(instance, phone, new_facts)
+            log.info(
+                "[lead_facts] %s/%s update: plataforma=%s estagio=%s plano=%s",
+                instance, phone,
+                new_facts.get("plataforma"),
+                new_facts.get("estagio"),
+                new_facts.get("plano_interesse"),
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[lead_facts] persist erro: %s", exc)
+
+    return {"lead_facts": new_facts}
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -442,6 +509,7 @@ async def respond_node(state: SalesState) -> dict[str, Any]:
         state.get("summary", ""),
         flows_prompt_block(project_id),
         base_prompt=state.get("system_prompt"),
+        lead_facts=state.get("lead_facts"),
     )
 
     messages: list[Any] = [SystemMessage(content=system_prompt)]
@@ -492,6 +560,7 @@ async def close_sale_node(state: SalesState) -> dict[str, Any]:
         flows_prompt_block(state["project_id"]),
         base_prompt=state.get("system_prompt"),
         specialist_focus=CLOSE_FOCUS,
+        lead_facts=state.get("lead_facts"),
     )
 
     messages: list[Any] = [SystemMessage(content=system)]
@@ -603,17 +672,28 @@ async def vision_node(state: SalesState) -> dict[str, Any]:
 # Especialistas por intenção (cada um com prompt próprio)
 # ────────────────────────────────────────────────────────────────────
 
-GREETING_FOCUS = """MOMENTO DE PRIMEIRO CONTATO. Cliente acabou de chegar — NUNCA TEVE CONVERSA ANTES.
+GREETING_FOCUS = """MOMENTO DE SAUDACAO.
 
-LEIA o historico de mensagens. Se voce ja se apresentou ou ja tem informacao do lead,
-NAO esta no momento de saudacao — voce esta CONTINUANDO conversa, nao iniciando.
-Nesse caso, NAO faca pergunta de plataforma de novo, NAO se apresente de novo.
-Cumprimente curto ("eai!", "tudo bem?") e CONTINUE do ponto onde a conversa parou.
+CONSULTE o bloco <lead_conhecido> acima (se existir) ANTES de qualquer coisa.
 
-Se cliente realmente nao tem historico (1a vez): seja caloroso, descubra nome se nao souber,
-e DE O PRIMEIRO PASSO que as regras gerais ja definidas acima exigem (ex: perguntar plataforma).
+DOIS CENARIOS POSSIVEIS:
 
-RESPEITE 100% as regras gerais. NUNCA repita pergunta ja feita.
+CENARIO A — Lead nunca conversou antes (NADA em <lead_conhecido> OU estagio=descoberta sem nenhum dado):
+  - Seja caloroso ("eai!", "tudo bem?")
+  - Pergunte plataforma se nao souber (regra geral)
+  - Cumprimento + 1 pergunta direta
+
+CENARIO B — Lead ja conversou (tem dados em <lead_conhecido>, plataforma ja descoberta etc):
+  - NAO se apresente de novo, NAO pergunte plataforma de novo, NAO recomece pitch
+  - Cumprimente CURTO ("eai!", "voltou!", "como ta?")
+  - CONTINUE do estagio onde parou. Use "ultimo_resumo" pra retomar.
+  - Exemplos:
+    * estagio=preco → "eai! Tava esperando voce. Decidiu se vai pegar o de 3 meses?"
+    * estagio=objecao → "eai! Pensou melhor sobre o valor?"
+    * estagio=apresentacao → "eai! Lembrou do Game Pass? Posso te mostrar como funciona?"
+
+Se cliente parece confuso ('como assim?', '?', 'nao entendi'): pede desculpa CURTA
+("foi mal, escrevi mal!") + continua de onde parou. NUNCA recomece.
 
 Tag: [AGENDAR: 20]."""
 
@@ -656,6 +736,7 @@ async def _run_specialist(
         flows_prompt_block(state["project_id"]),
         base_prompt=state.get("system_prompt"),
         specialist_focus=specialist_focus,
+        lead_facts=state.get("lead_facts"),
     )
 
     messages: list[Any] = [SystemMessage(content=system)]

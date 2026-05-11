@@ -20,7 +20,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 CHAT_TTL_SECONDS = 60 * 60 * 72        # 72h
 DEDUP_TTL_SECONDS = 60 * 5             # 5 min
 MAX_HISTORY = 200                       # mesma janela do bot antigo
-MAX_CONTEXT_FOR_LLM = 24                # últimas N mensagens enviadas ao LLM
+MAX_CONTEXT_FOR_LLM = 40                # últimas N mensagens enviadas ao LLM (bumped 24→40 pra evitar amnésia)
 
 
 def _composite_id(instance: str, phone: str) -> str:
@@ -419,6 +419,29 @@ class RedisStore:
     async def reset_followup_attempts(self, instance: str, phone: str) -> None:
         """Lead respondeu → zera contador (próximo follow-up vai do começo)."""
         await self._cmd("DEL", self._attempts_key(instance, phone))
+
+    # ────────────────────────────────────────────────────────────
+    # Lead facts — estado estruturado do lead (plataforma/plano/estágio)
+    # Persistido entre turnos pra bot saber o que JÁ descobriu.
+    # ────────────────────────────────────────────────────────────
+
+    _LEAD_FACTS_TTL = 60 * 60 * 24 * 30  # 30 dias
+
+    def _lead_facts_key(self, instance: str, phone: str) -> str:
+        return f"lead_facts:{instance}:{phone}"
+
+    async def get_lead_facts(self, instance: str, phone: str) -> dict[str, Any] | None:
+        raw = await self._cmd("GET", self._lead_facts_key(instance, phone))
+        if not raw:
+            return None
+        try:
+            return json.loads(raw) if isinstance(raw, str) else None
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+    async def set_lead_facts(self, instance: str, phone: str, facts: dict[str, Any]) -> None:
+        key = self._lead_facts_key(instance, phone)
+        await self._cmd("SET", key, json.dumps(facts), "EX", str(self._LEAD_FACTS_TTL))
 
     # ────────────────────────────────────────────────────────────
     # Lead status registry — alimentado pelo strategist, lido pelo painel
