@@ -175,3 +175,90 @@ class AIModelsCatalogRepo:
             )
             r.raise_for_status()
             return r.json() or []
+
+
+# ────────────────────────────────────────────────────────────────────
+# Generic CRUD helper (flows, products)
+# ────────────────────────────────────────────────────────────────────
+
+class _SupaTable:
+    """Wrapper genérico pra CRUD em qualquer tabela com PK 'id'."""
+
+    def __init__(self, table: str):
+        self.table = table
+
+    async def list(self, project_id: str | None = None, **filters: Any) -> list[dict[str, Any]]:
+        url, _ = _supabase_creds()
+        if not url:
+            return []
+        params: dict[str, str] = {"select": "*", "order": "created_at.desc"}
+        if project_id:
+            params["project_id"] = f"eq.{project_id}"
+        for k, v in filters.items():
+            params[k] = f"eq.{v}"
+        async with httpx.AsyncClient(timeout=5.0) as c:
+            r = await c.get(f"{url}/rest/v1/{self.table}", params=params, headers=_headers())
+            r.raise_for_status()
+            return r.json() or []
+
+    async def get(self, row_id: str) -> dict[str, Any] | None:
+        url, _ = _supabase_creds()
+        async with httpx.AsyncClient(timeout=5.0) as c:
+            r = await c.get(
+                f"{url}/rest/v1/{self.table}",
+                params={"select": "*", "id": f"eq.{row_id}", "limit": "1"},
+                headers=_headers(),
+            )
+            r.raise_for_status()
+            d = r.json() or []
+            return d[0] if d else None
+
+    async def insert(self, row: dict[str, Any]) -> dict[str, Any]:
+        url, _ = _supabase_creds()
+        async with httpx.AsyncClient(timeout=5.0) as c:
+            r = await c.post(
+                f"{url}/rest/v1/{self.table}",
+                headers={**_headers(), "Prefer": "return=representation"},
+                json=row,
+            )
+            r.raise_for_status()
+            d = r.json() or []
+            return d[0] if d else {}
+
+    async def patch(self, row_id: str, fields: dict[str, Any]) -> dict[str, Any]:
+        url, _ = _supabase_creds()
+        async with httpx.AsyncClient(timeout=5.0) as c:
+            r = await c.patch(
+                f"{url}/rest/v1/{self.table}",
+                params={"id": f"eq.{row_id}"},
+                headers={**_headers(), "Prefer": "return=representation"},
+                json=fields,
+            )
+            r.raise_for_status()
+            d = r.json() or []
+            return d[0] if d else {}
+
+    async def delete(self, row_id: str) -> bool:
+        url, _ = _supabase_creds()
+        async with httpx.AsyncClient(timeout=5.0) as c:
+            r = await c.delete(
+                f"{url}/rest/v1/{self.table}",
+                params={"id": f"eq.{row_id}"},
+                headers=_headers(),
+            )
+            return r.is_success
+
+
+class FlowsRepo(_SupaTable):
+    def __init__(self): super().__init__("flows")
+
+
+class ProductsRepo(_SupaTable):
+    def __init__(self): super().__init__("products")
+    # products tem PK text; override get/delete pra usar string id
+    async def insert(self, row: dict[str, Any]) -> dict[str, Any]:
+        # products PK não é uuid auto — força id
+        if "id" not in row or not row["id"]:
+            import uuid
+            row["id"] = str(uuid.uuid4())
+        return await super().insert(row)

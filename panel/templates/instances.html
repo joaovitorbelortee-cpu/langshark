@@ -1,0 +1,162 @@
+{% extends "base.html" %}
+{% block title %}Instâncias — LangShark{% endblock %}
+{% block page_title %}Instâncias{% endblock %}
+
+{% block content %}
+<section class="page" x-data="instancesPage()" x-init="load()">
+  <div class="page-head">
+    <span class="page-eyebrow">CONEXÕES WHATSAPP</span>
+    <h2 class="page-title-large">Instâncias Evolution</h2>
+    <p class="page-subtitle">Gerencie suas conexões WhatsApp via Evolution API.</p>
+  </div>
+
+  <div class="agent-meta" style="margin-bottom: 20px;">
+    <div class="agent-meta-stats">
+      <span class="meta-chip">📱 <span x-text="items.length"></span> instâncias</span>
+    </div>
+    <button class="btn btn-primary" type="button" @click="openCreate()">+ Nova instância</button>
+  </div>
+
+  <div x-show="loading" class="empty-state"><div class="empty-icon">🌊</div><h3>Carregando...</h3></div>
+
+  <div x-show="!loading && items.length === 0" class="empty-state">
+    <div class="empty-icon">📱</div>
+    <h3>Nenhuma instância ainda</h3>
+    <p>Crie uma nova instância pra conectar um número WhatsApp.</p>
+  </div>
+
+  <div class="section-grid" x-show="!loading && items.length > 0">
+    <template x-for="inst in items" :key="inst.instance_name">
+      <div class="section-card" style="cursor: default;">
+        <div class="section-card-head">
+          <div class="section-card-title">
+            <span :class="'status-dot status-' + (inst.status || 'unknown')"></span>
+            <span x-text="inst.instance_name"></span>
+          </div>
+          <span class="section-badge" :class="inst.status === 'open' ? 'badge-filled' : 'badge-empty'"
+                x-text="inst.status || 'desconhecido'"></span>
+        </div>
+        <p class="section-preview">
+          <template x-if="inst.profile_name"><span x-text="'👤 ' + inst.profile_name"></span></template>
+          <template x-if="!inst.profile_name"><span class="preview-placeholder">Sem perfil conectado</span></template>
+          <br/>
+          <small x-text="inst.integration"></small>
+        </p>
+        <div class="section-foot" style="gap: 8px;">
+          <button class="btn btn-secondary" type="button" style="padding: 6px 12px; font-size: 12px;"
+                  @click="showQr(inst.instance_name)">📷 QR</button>
+          <button class="btn btn-secondary" type="button" style="padding: 6px 12px; font-size: 12px; color: var(--danger); border-color: rgba(239,68,68,0.30);"
+                  @click="removeInst(inst.instance_name)">🗑 Remover</button>
+        </div>
+      </div>
+    </template>
+  </div>
+
+  <!-- Modal Criar -->
+  <div class="modal-overlay" x-show="creating" x-transition.opacity @click.self="creating = false" style="display:none;">
+    <div class="modal-card" style="max-width: 480px;">
+      <header class="modal-head">
+        <h3 class="modal-title">Nova instância</h3>
+      </header>
+      <div style="padding: 20px;">
+        <label class="field" style="margin-bottom: 14px;">
+          <span class="field-label">Nome (sem espaços)</span>
+          <input class="input" type="text" x-model="newName" placeholder="ex: botzap" />
+        </label>
+        <div class="section-foot" style="justify-content: flex-end; gap: 8px;">
+          <button class="btn btn-secondary" type="button" @click="creating = false">Cancelar</button>
+          <button class="btn btn-primary" type="button" @click="createInst()">Criar</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal QR -->
+  <div class="modal-overlay" x-show="showingQr" x-transition.opacity @click.self="showingQr = false" style="display:none;">
+    <div class="modal-card" style="max-width: 560px;">
+      <header class="modal-head">
+        <h3 class="modal-title">QR Code — <span x-text="qrInstanceName"></span></h3>
+        <button class="btn btn-secondary" type="button" @click="showingQr = false">Fechar</button>
+      </header>
+      <div style="padding: 20px; text-align: center;">
+        <template x-if="qrImg">
+          <img :src="qrImg" alt="QR" style="max-width: 100%; border-radius: 8px;" />
+        </template>
+        <template x-if="!qrImg">
+          <p style="color: var(--text-muted);">Carregando QR...</p>
+        </template>
+        <p style="margin-top: 12px; color: var(--text-secondary); font-size: 13px;">
+          WhatsApp → ⋮ → Aparelhos conectados → Aponta câmera. QR expira em ~60s.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script>
+function instancesPage() {
+  return {
+    items: [],
+    loading: true,
+    creating: false,
+    newName: '',
+    showingQr: false,
+    qrInstanceName: '',
+    qrImg: '',
+
+    async load() {
+      this.loading = true;
+      try {
+        const r = await fetch('/api/admin/instances');
+        this.items = r.ok ? await r.json() : [];
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    openCreate() { this.newName = ''; this.creating = true; },
+
+    async createInst() {
+      const name = (this.newName || '').trim();
+      if (!name) return;
+      try {
+        const r = await fetch('/api/admin/instances', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({instance_name: name, project_id: 'padrao'}),
+        });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.detail || 'erro');
+        this.creating = false;
+        showToast('Instância criada. Escaneie o QR.', 'success');
+        this.qrInstanceName = name;
+        this.qrImg = d.qr_base64 || '';
+        this.showingQr = true;
+        await this.load();
+      } catch (e) { showToast('Falha: ' + e.message, 'error'); }
+    },
+
+    async showQr(name) {
+      this.qrInstanceName = name;
+      this.qrImg = '';
+      this.showingQr = true;
+      try {
+        const r = await fetch(`/api/admin/instances/${name}/qr`);
+        const d = await r.json();
+        this.qrImg = d.qr_base64 || '';
+      } catch (e) { showToast('Falha QR: ' + e.message, 'error'); }
+    },
+
+    async removeInst(name) {
+      if (!confirm(`Remover instância "${name}"? Desconecta WhatsApp.`)) return;
+      try {
+        const r = await fetch(`/api/admin/instances/${name}`, {method: 'DELETE'});
+        if (!r.ok) throw new Error('falha');
+        showToast('Instância removida', 'success');
+        await this.load();
+      } catch (e) { showToast('Falha: ' + e.message, 'error'); }
+    },
+  };
+}
+</script>
+{% endblock %}

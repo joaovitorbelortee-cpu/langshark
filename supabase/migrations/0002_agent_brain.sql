@@ -93,7 +93,10 @@ alter table public.project_config    enable row level security;
 alter table public.admin_users       enable row level security;
 alter table public.ai_models_catalog enable row level security;
 
-do $$ begin
+do $$
+declare
+  r record;
+begin
   for r in select tablename from pg_tables where schemaname='public'
            and tablename in ('project_config','admin_users','ai_models_catalog')
   loop

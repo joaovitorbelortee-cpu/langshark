@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}Configurações — LangShark{% endblock %}
+{% block page_title %}Configurações{% endblock %}
+
+{% block content %}
+<section class="page">
+  <div class="page-head">
+    <span class="page-eyebrow">CONFIG GERAL</span>
+    <h2 class="page-title-large">Configurações</h2>
+    <p class="page-subtitle">Status dos serviços conectados e info do projeto.</p>
+  </div>
+
+  <div class="agent-meta" style="margin-bottom: 20px;">
+    <div class="agent-meta-stats">
+      <span class="meta-chip">📊 LangShark v2</span>
+      <span class="meta-chip meta-on">● Online</span>
+    </div>
+  </div>
+
+  <div class="section-grid">
+    <div class="section-card" style="cursor: default;">
+      <div class="section-card-head">
+        <div class="section-card-title">📱 Evolution API</div>
+        <span class="section-badge {% if env_status.evolution %}badge-filled{% else %}badge-empty{% endif %}">
+          ● {% if env_status.evolution %}Conectado{% else %}Não configurado{% endif %}
+        </span>
+      </div>
+      <p class="section-preview">Bridge WhatsApp self-hosted. Recebe webhooks e envia mensagens.</p>
+    </div>
+
+    <div class="section-card" style="cursor: default;">
+      <div class="section-card-head">
+        <div class="section-card-title">🟥 Redis (Upstash)</div>
+        <span class="section-badge {% if env_status.redis %}badge-filled{% else %}badge-empty{% endif %}">
+          ● {% if env_status.redis %}Conectado{% else %}Local fallback{% endif %}
+        </span>
+      </div>
+      <p class="section-preview">Cache de conversas curto-prazo + lock por phone + dedup messageId.</p>
+    </div>
+
+    <div class="section-card" style="cursor: default;">
+      <div class="section-card-head">
+        <div class="section-card-title">⚡ QStash</div>
+        <span class="section-badge {% if env_status.qstash %}badge-filled{% else %}badge-empty{% endif %}">
+          ● {% if env_status.qstash %}Ativo{% else %}Sem follow-up{% endif %}
+        </span>
+      </div>
+      <p class="section-preview">Agendador de follow-ups via HTTP callback.</p>
+    </div>
+
+    <div class="section-card" style="cursor: default;">
+      <div class="section-card-head">
+        <div class="section-card-title">🤖 OpenRouter</div>
+        <span class="section-badge {% if env_status.openrouter %}badge-filled{% else %}badge-empty{% endif %}">
+          ● {% if env_status.openrouter %}Conectado{% else %}Sem chave{% endif %}
+        </span>
+      </div>
+      <p class="section-preview">Hub de LLMs (GPT/Claude/Gemini/DeepSeek/free).</p>
+    </div>
+
+    <div class="section-card" style="cursor: default;">
+      <div class="section-card-head">
+        <div class="section-card-title">🐘 Supabase</div>
+        <span class="section-badge {% if env_status.supabase %}badge-filled{% else %}badge-empty{% endif %}">
+          ● {% if env_status.supabase %}Conectado{% else %}Sem credencial{% endif %}
+        </span>
+      </div>
+      <p class="section-preview">Banco Postgres pro painel + RAG. Tabelas: project_config, admin_users, flows, products, ai_models_catalog, audit_log.</p>
+    </div>
+
+    <div class="section-card" style="cursor: default;">
+      <div class="section-card-head">
+        <div class="section-card-title">💾 Postgres Checkpointer</div>
+        <span class="section-badge {% if env_status.postgres %}badge-filled{% else %}badge-empty{% endif %}">
+          ● {% if env_status.postgres %}Durável{% else %}In-Memory{% endif %}
+        </span>
+      </div>
+      <p class="section-preview">State LangGraph persistido. Restart-safe.</p>
+    </div>
+  </div>
+
+  <div class="section-grid section-grid-full" style="margin-top: 16px;">
+    <div class="section-card" style="cursor: default;">
+      <div class="section-card-head">
+        <div class="section-card-title">🌐 Webhook URL (configure na Evolution)</div>
+      </div>
+      <p class="section-preview" style="font-family: var(--font-mono); color: var(--accent);">
+        {{ env_status.webhook_url }}
+      </p>
+      <div class="section-foot">
+        <span class="char-count">Header: <code>apikey: $WEBHOOK_SECRET</code></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="cta-card" style="margin-top: 20px;">
+    <div class="cta-content">
+      <h3>Variáveis sensíveis</h3>
+      <p>Chaves de API (OpenRouter, Supabase service_role, Evolution apikey) ficam no Railway. Edição manual via Railway dashboard.</p>
+    </div>
+    <a class="btn btn-secondary" href="https://railway.com" target="_blank">Abrir Railway →</a>
+  </div>
+</section>
+{% endblock %}

@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Reconquista — LangShark{% endblock %}
+{% block page_title %}Reconquista{% endblock %}
+
+{% block content %}
+<section class="page" x-data="{}">
+  <div class="page-head">
+    <span class="page-eyebrow">FOLLOW-UP AUTOMÁTICO</span>
+    <h2 class="page-title-large">Reconquista</h2>
+    <p class="page-subtitle">A IA decide a temperatura do lead e agenda follow-up via tag <code>[AGENDAR: N]</code>.</p>
+  </div>
+
+  <div class="agent-meta" style="margin-bottom: 20px;">
+    <div class="agent-meta-stats">
+      <span class="meta-chip">⚡ QStash agendador</span>
+      <span class="meta-chip meta-on">● Ativo</span>
+    </div>
+  </div>
+
+  <div class="section-grid">
+    <div class="section-card" style="cursor: default;">
+      <div class="section-card-head">
+        <div class="section-card-title">🔥 Lead Quente</div>
+        <span class="section-badge badge-filled">10-30 min</span>
+      </div>
+      <p class="section-preview">Engajado, perguntou preço, escolheu plano. Volta rápido pra manter o momentum.</p>
+    </div>
+    <div class="section-card" style="cursor: default;">
+      <div class="section-card-head">
+        <div class="section-card-title">😐 Lead Morno</div>
+        <span class="section-badge badge-filled">60-180 min</span>
+      </div>
+      <p class="section-preview">"Vou ver", "depois". Dá espaço de 1-3h, volta com ângulo diferente.</p>
+    </div>
+    <div class="section-card" style="cursor: default;">
+      <div class="section-card-head">
+        <div class="section-card-title">❄️ Lead Frio</div>
+        <span class="section-badge badge-filled">360-1440 min</span>
+      </div>
+      <p class="section-preview">Sumiu, só visualizou. Volta com valor (dica/conteúdo) — reciprocidade Cialdini.</p>
+    </div>
+    <div class="section-card" style="cursor: default;">
+      <div class="section-card-head">
+        <div class="section-card-title">🛑 KillSwitch</div>
+        <span class="section-badge badge-filled">Automático</span>
+      </div>
+      <p class="section-preview">Se o lead responde antes do follow-up disparar, QStash callback identifica e cancela. Anti-spam.</p>
+    </div>
+  </div>
+
+  <div class="cta-card" style="margin-top: 20px;">
+    <div class="cta-content">
+      <h3>Como funciona</h3>
+      <p>A IA emite tag <code>[AGENDAR: N]</code> ao final de cada resposta. QStash agenda HTTP callback após N minutos
+         pra <code>/api/trigger-followup</code> que dispara nova mensagem do bot.</p>
+    </div>
+    <a class="btn btn-secondary" href="/admin/agent">Editar prompt →</a>
+  </div>
+
+  <div class="page-foot-info">
+    <p>Edição da cadência fica na seção "Parâmetros" do prompt (página Agente).</p>
+  </div>
+</section>
+{% endblock %}

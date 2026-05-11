@@ -154,25 +154,99 @@ async def agent_page(
     )
 
 
-@views_router.get("/{section}", response_class=HTMLResponse)
-async def stub_section(
-    section: str,
+@views_router.get("/instances", response_class=HTMLResponse)
+async def instances_page(
     request: Request,
     user: Annotated[dict[str, Any], Depends(require_admin)],
 ):
-    valid = {"instances", "flows", "knowledge", "recovery", "settings"}
-    if section not in valid:
-        raise HTTPException(404, "Pagina nao encontrada")
     projects = await _project_repo.list()
     current = _pick_current_project(projects, request.query_params.get("project_id"))
     return templates.TemplateResponse(
         request,
-        "stub.html",
+        "instances.html",
         {
-            "user": user,
-            "projects": projects,
-            "current_project": current,
-            "active_section": section,
-            "section_title": section.capitalize(),
+            "user": user, "projects": projects, "current_project": current,
+            "active_section": "instances", "page_title": "Instâncias",
+        },
+    )
+
+
+@views_router.get("/flows", response_class=HTMLResponse)
+async def flows_page(
+    request: Request,
+    user: Annotated[dict[str, Any], Depends(require_admin)],
+):
+    projects = await _project_repo.list()
+    current = _pick_current_project(projects, request.query_params.get("project_id"))
+    return templates.TemplateResponse(
+        request,
+        "flows.html",
+        {
+            "user": user, "projects": projects, "current_project": current,
+            "active_section": "flows", "page_title": "Fluxos Inteligentes",
+        },
+    )
+
+
+@views_router.get("/knowledge", response_class=HTMLResponse)
+async def knowledge_page(
+    request: Request,
+    user: Annotated[dict[str, Any], Depends(require_admin)],
+):
+    projects = await _project_repo.list()
+    current = _pick_current_project(projects, request.query_params.get("project_id"))
+    return templates.TemplateResponse(
+        request,
+        "knowledge.html",
+        {
+            "user": user, "projects": projects, "current_project": current,
+            "active_section": "knowledge", "page_title": "Base de Conhecimento",
+        },
+    )
+
+
+@views_router.get("/recovery", response_class=HTMLResponse)
+async def recovery_page(
+    request: Request,
+    user: Annotated[dict[str, Any], Depends(require_admin)],
+):
+    projects = await _project_repo.list()
+    current = _pick_current_project(projects, request.query_params.get("project_id"))
+    cfg = await _project_repo.fetch(current["project_id"]) if current else {}
+    return templates.TemplateResponse(
+        request,
+        "recovery.html",
+        {
+            "user": user, "projects": projects, "current_project": current,
+            "config": cfg or {},
+            "active_section": "recovery", "page_title": "Reconquista",
+        },
+    )
+
+
+@views_router.get("/settings", response_class=HTMLResponse)
+async def settings_page(
+    request: Request,
+    user: Annotated[dict[str, Any], Depends(require_admin)],
+):
+    import os
+    projects = await _project_repo.list()
+    current = _pick_current_project(projects, request.query_params.get("project_id"))
+    env_status = {
+        "webhook_url":  f"https://{os.getenv('PUBLIC_BASE_URL', 'bot-vendas-production-0be5.up.railway.app').replace('https://','').rstrip('/')}/webhook/evolution",
+        "evolution":    bool(os.getenv("EVOLUTION_API_URL")),
+        "redis":        bool(os.getenv("UPSTASH_REDIS_REST_URL")),
+        "qstash":       bool(os.getenv("QSTASH_TOKEN")),
+        "openrouter":   bool(os.getenv("OPENROUTER_API_KEY")),
+        "supabase":     bool(os.getenv("SUPABASE_URL")),
+        "postgres":     bool(os.getenv("POSTGRES_URL")),
+    }
+    return templates.TemplateResponse(
+        request,
+        "settings.html",
+        {
+            "user": user, "projects": projects, "current_project": current,
+            "env_status": env_status,
+            "active_section": "settings", "page_title": "Configurações",
         },
     )

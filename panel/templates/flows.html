@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+{% block title %}Fluxos — LangShark{% endblock %}
+{% block page_title %}Fluxos Inteligentes{% endblock %}
+
+{% block content %}
+<section class="page" x-data="flowsPage()" x-init="load()">
+  <div class="page-head">
+    <span class="page-eyebrow">SEQUÊNCIAS PRÉ-GRAVADAS</span>
+    <h2 class="page-title-large">Fluxos Inteligentes</h2>
+    <p class="page-subtitle">Sequências de texto/imagem/vídeo que a IA dispara via tag <code>[FLOW: nome]</code>.</p>
+  </div>
+
+  <div class="agent-meta" style="margin-bottom: 20px;">
+    <div class="agent-meta-stats">
+      <span class="meta-chip">⚡ <span x-text="items.length"></span> fluxos</span>
+    </div>
+    <button class="btn btn-primary" type="button" @click="openCreate()">+ Novo fluxo</button>
+  </div>
+
+  <div x-show="loading" class="empty-state"><div class="empty-icon">🌊</div><h3>Carregando...</h3></div>
+
+  <div x-show="!loading && items.length === 0" class="empty-state">
+    <div class="empty-icon">⚡</div>
+    <h3>Nenhum fluxo ainda</h3>
+    <p>Crie um pra IA disparar sequências cadastradas via <code>[FLOW: nome]</code>.</p>
+  </div>
+
+  <div class="section-grid section-grid-full" x-show="!loading && items.length > 0">
+    <template x-for="f in items" :key="f.id">
+      <div class="section-card" style="cursor: default;">
+        <div class="section-card-head">
+          <div class="section-card-title">
+            <svg class="ico-section" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+            </svg>
+            <span x-text="f.name"></span>
+          </div>
+          <span class="section-badge" :class="f.enabled ? 'badge-filled' : 'badge-empty'"
+                x-text="f.enabled ? '● Ativo' : '○ Pausado'"></span>
+        </div>
+        <p class="section-preview" x-text="f.description || 'Sem descrição'"></p>
+        <div class="section-foot" style="justify-content: space-between;">
+          <span class="char-count" x-text="(f.steps?.length || 0) + ' passos'"></span>
+          <div style="display: flex; gap: 8px;">
+            <button class="btn btn-secondary" type="button" style="padding: 6px 12px; font-size: 12px;"
+                    @click="openEdit(f)">Editar</button>
+            <button class="btn btn-secondary" type="button" style="padding: 6px 12px; font-size: 12px; color: var(--danger); border-color: rgba(239,68,68,0.30);"
+                    @click="del(f.id)">Remover</button>
+          </div>
+        </div>
+      </div>
+    </template>
+  </div>
+
+  <!-- Modal Criar/Editar -->
+  <div class="modal-overlay" x-show="editing" x-transition.opacity @click.self="editing = false" style="display:none;">
+    <div class="modal-card">
+      <header class="modal-head">
+        <h3 class="modal-title" x-text="editId ? 'Editar fluxo' : 'Novo fluxo'"></h3>
+      </header>
+      <div style="padding: 20px; display: flex; flex-direction: column; gap: 14px;">
+        <label class="field">
+          <span class="field-label">Nome</span>
+          <input class="input" type="text" x-model="form.name" placeholder="ex: boas_vindas" />
+        </label>
+        <label class="field">
+          <span class="field-label">Descrição</span>
+          <input class="input" type="text" x-model="form.description" placeholder="O que esse fluxo faz" />
+        </label>
+        <label class="field">
+          <span class="field-label">Passos (JSON array)</span>
+          <textarea class="editor-textarea" style="min-height: 220px; border-radius: 8px;"
+                    x-model="form.stepsJson"
+                    placeholder='[{"type":"text","content":"Olá!"},{"type":"text","content":"Tudo bem?"}]'></textarea>
+          <small style="color: var(--text-muted); font-size: 11px; margin-top: 4px;">
+            Tipos: text/image/video/audio/document. text usa <code>content</code>; mídia usa <code>url</code> + <code>caption</code>.
+          </small>
+        </label>
+        <label style="display: inline-flex; align-items: center; gap: 8px; color: var(--text-secondary);">
+          <input type="checkbox" x-model="form.enabled" /> Ativo
+        </label>
+        <div class="section-foot" style="justify-content: flex-end; gap: 8px;">
+          <button class="btn btn-secondary" type="button" @click="editing = false">Cancelar</button>
+          <button class="btn btn-primary" type="button" @click="save()">Salvar</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script>
+function flowsPage() {
+  return {
+    items: [],
+    loading: true,
+    editing: false,
+    editId: null,
+    form: { name: '', description: '', stepsJson: '[]', enabled: true },
+
+    async load() {
+      this.loading = true;
+      try {
+        const r = await fetch('/api/admin/flows?project_id=padrao');
+        this.items = r.ok ? await r.json() : [];
+      } finally { this.loading = false; }
+    },
+
+    openCreate() {
+      this.editId = null;
+      this.form = { name: '', description: '', stepsJson: '[]', enabled: true };
+      this.editing = true;
+    },
+
+    openEdit(f) {
+      this.editId = f.id;
+      this.form = {
+        name: f.name,
+        description: f.description || '',
+        stepsJson: JSON.stringify(f.steps || [], null, 2),
+        enabled: f.enabled,
+      };
+      this.editing = true;
+    },
+
+    async save() {
+      let steps;
+      try { steps = JSON.parse(this.form.stepsJson); }
+      catch (e) { return showToast('Steps JSON inválido', 'error'); }
+      const body = {
+        project_id: 'padrao',
+        name: this.form.name.trim(),
+        description: this.form.description,
+        steps: steps,
+        enabled: this.form.enabled,
+      };
+      try {
+        const url = this.editId ? `/api/admin/flows/${this.editId}` : '/api/admin/flows';
+        const method = this.editId ? 'PATCH' : 'POST';
+        const r = await fetch(url, { method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
+        if (!r.ok) throw new Error('falha');
+        this.editing = false;
+        showToast('Fluxo salvo', 'success');
+        await this.load();
+      } catch (e) { showToast('Falha: ' + e.message, 'error'); }
+    },
+
+    async del(id) {
+      if (!confirm('Remover fluxo?')) return;
+      try {
+        const r = await fetch(`/api/admin/flows/${id}`, { method: 'DELETE' });
+        if (!r.ok) throw new Error('falha');
+        showToast('Fluxo removido', 'success');
+        await this.load();
+      } catch (e) { showToast('Falha: ' + e.message, 'error'); }
+    },
+  };
+}
+</script>
+{% endblock %}

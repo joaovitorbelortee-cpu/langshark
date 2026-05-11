@@ -1,0 +1,125 @@
+/* F5 polish — animações sutis tema oceânico + status dots + mobile responsive extras */
+
+/* ────── status dots animados ────── */
+.status-dot {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  margin-right: 6px;
+  flex-shrink: 0;
+}
+.status-dot.status-open       { background: var(--success); box-shadow: 0 0 10px var(--success); animation: pulse-soft 2.4s ease-in-out infinite; }
+.status-dot.status-connecting { background: var(--warning); animation: pulse-soft 1s ease-in-out infinite; }
+.status-dot.status-close      { background: var(--danger); }
+.status-dot.status-unknown    { background: var(--text-muted); }
+
+@keyframes pulse-soft {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.6; transform: scale(1.15); }
+}
+
+/* ────── ripple no clique de cards ────── */
+.section-card { position: relative; overflow: hidden; }
+.section-card::after {
+  content: '';
+  position: absolute; inset: 0;
+  background: radial-gradient(circle at var(--rx, 50%) var(--ry, 50%),
+                              rgba(34,211,238,0.20) 0%,
+                              transparent 50%);
+  opacity: 0;
+  transition: opacity 350ms var(--ease);
+  pointer-events: none;
+}
+.section-card:active::after { opacity: 1; transition: none; }
+
+/* ────── wave-drift na sidebar (subtle background line) ────── */
+.sidebar::after {
+  content: '';
+  position: absolute;
+  right: -1px; top: 0; bottom: 0; width: 1px;
+  background: linear-gradient(180deg,
+              transparent 0%, var(--accent) 30%, var(--text-accent) 60%, transparent 100%);
+  opacity: 0.18;
+  animation: wave-drift 14s ease-in-out infinite;
+}
+@keyframes wave-drift {
+  0%, 100% { transform: translateY(0); opacity: 0.18; }
+  50%      { transform: translateY(40px); opacity: 0.35; }
+}
+
+/* ────── KPI card hover lift ────── */
+.kpi-card { transition: transform var(--dur-base) var(--ease), border-color var(--dur-base) var(--ease); }
+.kpi-card:hover { transform: translateY(-2px); border-color: var(--border-active); }
+
+/* ────── tab transition ────── */
+.tab { transition: color var(--dur-fast), border-color var(--dur-fast); }
+
+/* ────── input focus glow ────── */
+.input:focus { box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow-glow); }
+
+/* ────── btn primary shine ────── */
+.btn-primary { position: relative; overflow: hidden; }
+.btn-primary::before {
+  content: '';
+  position: absolute; top: 0; left: -100%; width: 100%; height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.15), transparent);
+  transition: left var(--dur-slow, 400ms) var(--ease);
+}
+.btn-primary:hover::before { left: 100%; }
+
+/* ────── modal entrance ────── */
+.modal-overlay { animation: fade-in 200ms var(--ease); }
+.modal-card    { animation: rise-in 250ms var(--ease); }
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(12px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* ────── loading shimmer skeleton ────── */
+.skeleton {
+  background: linear-gradient(90deg,
+              var(--bg-card) 0%, var(--bg-card-hover) 50%, var(--bg-card) 100%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s linear infinite;
+  border-radius: var(--r-md);
+}
+@keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+
+/* ────── mobile responsive extras ────── */
+@media (max-width: 900px) {
+  .agent-meta            { flex-direction: column; align-items: stretch; gap: 12px; }
+  .agent-meta-stats      { flex-wrap: wrap; }
+  .modal-card            { max-width: calc(100vw - 24px); }
+  .section-grid          { grid-template-columns: 1fr; }
+  .field-inline          { flex-direction: column; align-items: stretch; gap: 8px; }
+  .field-inline .field-label { min-width: 0; }
+  .cta-card              { flex-direction: column; align-items: stretch; gap: 16px; }
+  .page-title-large      { font-size: 18px; }
+}
+
+@media (max-width: 600px) {
+  .content { padding: 16px; }
+  .header { padding: 0 12px; }
+  .user-name { display: none; }
+  .model-chip span { display: none; }
+  .login-card { padding: 28px 20px; }
+}
+
+/* ────── focus visible accessibility ────── */
+button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+button:focus:not(:focus-visible), a:focus:not(:focus-visible) { outline: none; }
+
+/* ────── code/inline-code ────── */
+code {
+  background: var(--bg-input);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  color: var(--accent);
+}

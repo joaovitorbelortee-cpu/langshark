@@ -209,3 +209,203 @@ async def list_instances() -> list[dict[str, Any]]:
             "integration":   inst.get("integration", "WHATSAPP-BAILEYS"),
         })
     return out
+
+
+def _evolution_creds() -> tuple[str, str]:
+    return os.getenv("EVOLUTION_API_URL", "").rstrip("/"), os.getenv("EVOLUTION_API_KEY", "")
+
+
+@admin_router.post("/instances")
+async def create_instance(
+    body: dict = Body(...),
+    user: Annotated[dict[str, Any], Depends(require_admin)] = None,  # type: ignore
+) -> dict[str, Any]:
+    """Cria instância Evolution + opcionalmente bind a project_id."""
+    name = (body.get("instance_name") or "").strip()
+    project_id = (body.get("project_id") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="instance_name obrigatorio")
+    base_url, api_key = _evolution_creds()
+    if not base_url:
+        raise HTTPException(status_code=503, detail="EVOLUTION_API_URL ausente")
+    import httpx
+    async with httpx.AsyncClient(timeout=20.0) as c:
+        r = await c.post(
+            f"{base_url}/instance/create",
+            headers={"apikey": api_key, "Content-Type": "application/json"},
+            json={"instanceName": name, "qrcode": True, "integration": "WHATSAPP-BAILEYS"},
+        )
+        if not r.is_success:
+            raise HTTPException(status_code=r.status_code, detail=r.text[:200])
+        evo_payload = r.json()
+    # Bind ao projeto (tabela instance_projects)
+    if project_id:
+        from panel.repos import _supabase_creds, _headers
+        url, _ = _supabase_creds()
+        async with httpx.AsyncClient(timeout=5.0) as c:
+            await c.post(
+                f"{url}/rest/v1/instance_projects",
+                headers={**_headers(), "Prefer": "resolution=merge-duplicates"},
+                json={"instance_name": name, "project_id": project_id},
+            )
+    qr = (evo_payload.get("qrcode") or {}).get("base64")
+    return {"ok": True, "instance_name": name, "qr_base64": qr, "evolution": evo_payload}
+
+
+@admin_router.delete("/instances/{instance_name}")
+async def delete_instance(
+    instance_name: str,
+    user: Annotated[dict[str, Any], Depends(require_admin)] = None,  # type: ignore
+) -> dict[str, Any]:
+    base_url, api_key = _evolution_creds()
+    if not base_url:
+        raise HTTPException(status_code=503, detail="EVOLUTION_API_URL ausente")
+    import httpx
+    async with httpx.AsyncClient(timeout=20.0) as c:
+        # Logout primeiro (ignora erro), depois delete
+        await c.delete(f"{base_url}/instance/logout/{instance_name}", headers={"apikey": api_key})
+        r = await c.delete(f"{base_url}/instance/delete/{instance_name}", headers={"apikey": api_key})
+        if r.status_code not in (200, 404):
+            raise HTTPException(status_code=r.status_code, detail=r.text[:200])
+    return {"ok": True, "deleted": instance_name}
+
+
+@admin_router.get("/instances/{instance_name}/qr")
+async def get_instance_qr(
+    instance_name: str,
+    user: Annotated[dict[str, Any], Depends(require_admin)] = None,  # type: ignore
+) -> dict[str, Any]:
+    base_url, api_key = _evolution_creds()
+    import httpx
+    async with httpx.AsyncClient(timeout=15.0) as c:
+        r = await c.get(f"{base_url}/instance/connect/{instance_name}", headers={"apikey": api_key})
+        if not r.is_success:
+            raise HTTPException(status_code=r.status_code, detail=r.text[:200])
+        d = r.json()
+    return {"ok": True, "qr_base64": d.get("base64"), "code": d.get("code")}
+
+
+@admin_router.get("/instances/{instance_name}/status")
+async def get_instance_status(
+    instance_name: str,
+    user: Annotated[dict[str, Any], Depends(require_admin)] = None,  # type: ignore
+) -> dict[str, Any]:
+    base_url, api_key = _evolution_creds()
+    import httpx
+    async with httpx.AsyncClient(timeout=8.0) as c:
+        r = await c.get(f"{base_url}/instance/connectionState/{instance_name}", headers={"apikey": api_key})
+        if not r.is_success:
+            return {"state": "unknown"}
+        d = r.json()
+    inst = d.get("instance") or {}
+    return {"state": inst.get("state") or "unknown"}
+
+
+# ────────────────────────────────────────────────────────────────────
+# Flows CRUD (F4)
+# ────────────────────────────────────────────────────────────────────
+
+from panel.repos import FlowsRepo, ProductsRepo  # noqa: E402
+
+_flows_repo = FlowsRepo()
+_products_repo = ProductsRepo()
+
+
+@admin_router.get("/flows")
+async def list_flows(
+    project_id: str = "padrao",
+    user: Annotated[dict[str, Any], Depends(require_admin)] = None,  # type: ignore
+) -> list[dict[str, Any]]:
+    return await _flows_repo.list(project_id=project_id)
+
+
+@admin_router.post("/flows")
+async def create_flow(
+    body: dict = Body(...),
+    user: Annotated[dict[str, Any], Depends(require_admin)] = None,  # type: ignore
+) -> dict[str, Any]:
+    project_id = body.get("project_id") or "padrao"
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name obrigatorio")
+    row = await _flows_repo.insert({
+        "project_id":  project_id,
+        "name":        name,
+        "description": body.get("description") or "",
+        "steps":       body.get("steps") or [],
+        "enabled":     body.get("enabled", True),
+    })
+    return {"ok": True, "flow": row}
+
+
+@admin_router.patch("/flows/{flow_id}")
+async def patch_flow(
+    flow_id: str,
+    body: dict = Body(...),
+    user: Annotated[dict[str, Any], Depends(require_admin)] = None,  # type: ignore
+) -> dict[str, Any]:
+    allowed = {"name", "description", "steps", "enabled"}
+    payload = {k: v for k, v in body.items() if k in allowed}
+    row = await _flows_repo.patch(flow_id, payload)
+    return {"ok": True, "flow": row}
+
+
+@admin_router.delete("/flows/{flow_id}")
+async def delete_flow(
+    flow_id: str,
+    user: Annotated[dict[str, Any], Depends(require_admin)] = None,  # type: ignore
+) -> dict[str, Any]:
+    ok = await _flows_repo.delete(flow_id)
+    return {"ok": ok}
+
+
+# ────────────────────────────────────────────────────────────────────
+# Products CRUD (F4 — Base de Conhecimento)
+# ────────────────────────────────────────────────────────────────────
+
+@admin_router.get("/products")
+async def list_products(
+    project_id: str = "padrao",
+    user: Annotated[dict[str, Any], Depends(require_admin)] = None,  # type: ignore
+) -> list[dict[str, Any]]:
+    return await _products_repo.list(project_id=project_id)
+
+
+@admin_router.post("/products")
+async def create_product(
+    body: dict = Body(...),
+    user: Annotated[dict[str, Any], Depends(require_admin)] = None,  # type: ignore
+) -> dict[str, Any]:
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name obrigatorio")
+    row = await _products_repo.insert({
+        "id":          body.get("id"),  # auto-uuid se vazio
+        "project_id":  body.get("project_id") or "padrao",
+        "name":        name,
+        "description": body.get("description") or "",
+        "price":       body.get("price"),
+        "metadata":    body.get("metadata") or {},
+    })
+    return {"ok": True, "product": row}
+
+
+@admin_router.patch("/products/{product_id}")
+async def patch_product(
+    product_id: str,
+    body: dict = Body(...),
+    user: Annotated[dict[str, Any], Depends(require_admin)] = None,  # type: ignore
+) -> dict[str, Any]:
+    allowed = {"name", "description", "price", "metadata"}
+    payload = {k: v for k, v in body.items() if k in allowed}
+    row = await _products_repo.patch(product_id, payload)
+    return {"ok": True, "product": row}
+
+
+@admin_router.delete("/products/{product_id}")
+async def delete_product(
+    product_id: str,
+    user: Annotated[dict[str, Any], Depends(require_admin)] = None,  # type: ignore
+) -> dict[str, Any]:
+    ok = await _products_repo.delete(product_id)
+    return {"ok": ok}

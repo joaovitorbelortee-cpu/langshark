@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+{% block title %}Base de Conhecimento — LangShark{% endblock %}
+{% block page_title %}Base de Conhecimento{% endblock %}
+
+{% block content %}
+<section class="page" x-data="knowledgePage()" x-init="load()">
+  <div class="page-head">
+    <span class="page-eyebrow">CATÁLOGO RAG</span>
+    <h2 class="page-title-large">Base de Conhecimento</h2>
+    <p class="page-subtitle">Produtos que a IA usa via RAG (busca semântica) durante a conversa.</p>
+  </div>
+
+  <div class="agent-meta" style="margin-bottom: 20px;">
+    <div class="agent-meta-stats">
+      <span class="meta-chip">📚 <span x-text="items.length"></span> produtos</span>
+    </div>
+    <button class="btn btn-primary" type="button" @click="openCreate()">+ Novo produto</button>
+  </div>
+
+  <div x-show="loading" class="empty-state"><div class="empty-icon">🌊</div><h3>Carregando...</h3></div>
+
+  <div x-show="!loading && items.length === 0" class="empty-state">
+    <div class="empty-icon">📚</div>
+    <h3>Sem produtos cadastrados</h3>
+    <p>Adicione produtos pra IA referenciar durante vendas.</p>
+  </div>
+
+  <div class="section-grid" x-show="!loading && items.length > 0">
+    <template x-for="p in items" :key="p.id">
+      <div class="section-card" style="cursor: default;">
+        <div class="section-card-head">
+          <div class="section-card-title">
+            <svg class="ico-section" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="12" y1="1" x2="12" y2="23"/>
+              <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>
+            </svg>
+            <span x-text="p.name"></span>
+          </div>
+          <span class="section-badge badge-filled" x-show="p.price !== null && p.price !== undefined"
+                x-text="'R$ ' + (p.price || 0).toFixed(2)"></span>
+        </div>
+        <p class="section-preview" x-text="p.description || 'Sem descrição'"></p>
+        <div class="section-foot" style="justify-content: space-between;">
+          <span class="char-count" x-text="p.id"></span>
+          <div style="display: flex; gap: 8px;">
+            <button class="btn btn-secondary" type="button" style="padding: 6px 12px; font-size: 12px;"
+                    @click="openEdit(p)">Editar</button>
+            <button class="btn btn-secondary" type="button" style="padding: 6px 12px; font-size: 12px; color: var(--danger); border-color: rgba(239,68,68,0.30);"
+                    @click="del(p.id)">Remover</button>
+          </div>
+        </div>
+      </div>
+    </template>
+  </div>
+
+  <!-- Modal Criar/Editar -->
+  <div class="modal-overlay" x-show="editing" x-transition.opacity @click.self="editing = false" style="display:none;">
+    <div class="modal-card" style="max-width: 600px;">
+      <header class="modal-head">
+        <h3 class="modal-title" x-text="editId ? 'Editar produto' : 'Novo produto'"></h3>
+      </header>
+      <div style="padding: 20px; display: flex; flex-direction: column; gap: 14px;">
+        <label class="field">
+          <span class="field-label">ID (slug — usar nos links de pagamento)</span>
+          <input class="input" type="text" x-model="form.id" :disabled="!!editId"
+                 placeholder="ex: plano-pro" />
+        </label>
+        <label class="field">
+          <span class="field-label">Nome</span>
+          <input class="input" type="text" x-model="form.name" placeholder="ex: Plano Pro 3 meses" />
+        </label>
+        <label class="field">
+          <span class="field-label">Descrição</span>
+          <textarea class="input" rows="4" x-model="form.description"
+                    placeholder="O que está incluído, link de pagamento, condições..."></textarea>
+        </label>
+        <label class="field">
+          <span class="field-label">Preço (R$)</span>
+          <input class="input" type="number" step="0.01" x-model.number="form.price" />
+        </label>
+        <div class="section-foot" style="justify-content: flex-end; gap: 8px;">
+          <button class="btn btn-secondary" type="button" @click="editing = false">Cancelar</button>
+          <button class="btn btn-primary" type="button" @click="save()">Salvar</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script>
+function knowledgePage() {
+  return {
+    items: [],
+    loading: true,
+    editing: false,
+    editId: null,
+    form: { id: '', name: '', description: '', price: 0 },
+
+    async load() {
+      this.loading = true;
+      try {
+        const r = await fetch('/api/admin/products?project_id=padrao');
+        this.items = r.ok ? await r.json() : [];
+      } finally { this.loading = false; }
+    },
+
+    openCreate() {
+      this.editId = null;
+      this.form = { id: '', name: '', description: '', price: 0 };
+      this.editing = true;
+    },
+
+    openEdit(p) {
+      this.editId = p.id;
+      this.form = { id: p.id, name: p.name, description: p.description || '', price: p.price || 0 };
+      this.editing = true;
+    },
+
+    async save() {
+      const body = {
+        project_id: 'padrao',
+        id: this.form.id.trim() || null,
+        name: this.form.name.trim(),
+        description: this.form.description,
+        price: this.form.price,
+        metadata: {},
+      };
+      try {
+        const url = this.editId ? `/api/admin/products/${this.editId}` : '/api/admin/products';
+        const method = this.editId ? 'PATCH' : 'POST';
+        const r = await fetch(url, { method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
+        if (!r.ok) throw new Error('falha');
+        this.editing = false;
+        showToast('Produto salvo', 'success');
+        await this.load();
+      } catch (e) { showToast('Falha: ' + e.message, 'error'); }
+    },
+
+    async del(id) {
+      if (!confirm('Remover produto?')) return;
+      try {
+        const r = await fetch(`/api/admin/products/${id}`, { method: 'DELETE' });
+        if (!r.ok) throw new Error('falha');
+        showToast('Produto removido', 'success');
+        await this.load();
+      } catch (e) { showToast('Falha: ' + e.message, 'error'); }
+    },
+  };
+}
+</script>
+{% endblock %}
