@@ -46,6 +46,7 @@ _checkpointer_provider: CheckpointerProvider | None = None
 _store_provider: Any | None = None  # StoreProvider, lazy import pra evitar erro se módulo faltar
 _graph_app: Any | None = None
 _worker_task: asyncio.Task[Any] | None = None
+_inbox_drainer_task: asyncio.Task[Any] | None = None
 _worker_stop_evt: asyncio.Event = asyncio.Event()
 
 import random  # noqa: E402
@@ -113,19 +114,23 @@ async def lifespan(_app: FastAPI):
     # Sobe worker FIFO — drena queue Redis serialmente, 1 mensagem por vez,
     # anti-ban WhatsApp (paralelismo dispararia N envios simultâneos).
     _worker_stop_evt.clear()
+    global _inbox_drainer_task
     _worker_task = asyncio.create_task(_queue_worker_loop(), name="queue-worker")
-    log.info("[startup] FIFO queue worker iniciado")
+    _inbox_drainer_task = asyncio.create_task(_inbox_drainer_loop(), name="inbox-drainer")
+    log.info("[startup] FIFO worker + inbox drainer iniciados (debounce=%.1fs)",
+             INBOX_DEBOUNCE_S)
 
     try:
         yield
     finally:
         _worker_stop_evt.set()
-        if _worker_task and not _worker_task.done():
-            _worker_task.cancel()
-            try:
-                await _worker_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
+        for t, name in ((_worker_task, "queue-worker"), (_inbox_drainer_task, "inbox-drainer")):
+            if t and not t.done():
+                t.cancel()
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
         if _checkpointer_provider:
             await _checkpointer_provider.aclose()
         if _store_provider:
@@ -443,28 +448,22 @@ async def webhook(request: Request) -> dict:
         except Exception:  # noqa: BLE001
             pass
 
-    # Empilha na FIFO global — worker drena
-    queue_payload = {
-        "kind": "inbound",
-        "instance": instance,
-        "phone": phone,
+    # Coalescing de rajada (anti-spam reply): push pro inbox-per-lead em vez
+    # de enfileirar direto. Drainer loop combina msgs que chegam em rajada
+    # dentro de INBOX_DEBOUNCE_S e enfileira PAYLOAD ÚNICO com user_message
+    # concatenado. Bot responde TUDO em 1 turno (max 4 bolhas).
+    inbox_item = {
+        "ts": time.time(),
+        "text": user_message,
         "message_id": message_id,
-        "enqueued_at": time.time(),
-        "initial_state": {
-            "project_id": project_id_hint,
-            "instance_name": instance,
-            "phone": phone,
-            "push_name": push_name,
-            "user_message": user_message,
-            "media_mime": media["mime"] if media else None,
-            "media_base64": media["base64"] if media else None,
-            "message_id": message_id,
-            "messages": [],
-        },
+        "media_mime": media["mime"] if media else None,
+        "media_base64": media["base64"] if media else None,
+        "push_name": push_name,
+        "project_id_hint": project_id_hint,
     }
-    qsize = await redis.enqueue_message(queue_payload)
-    log.info("[queue] enqueued inbound %s/%s (size=%d)", instance, phone, qsize)
-    return {"ok": True, "queued": True, "queue_size": qsize}
+    inbox_size = await redis.push_inbox(instance, phone, inbox_item)
+    log.info("[inbox] %s/%s pushed (size=%d)", instance, phone, inbox_size)
+    return {"ok": True, "queued": False, "inboxed": True, "inbox_size": inbox_size}
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -522,6 +521,124 @@ async def trigger_followup(request: Request) -> dict:
     qsize = await redis.enqueue_message(queue_payload)
     log.info("[queue] enqueued followup %s/%s (size=%d)", instance, phone, qsize)
     return {"ok": True, "queued": True, "queue_size": qsize}
+
+
+# ────────────────────────────────────────────────────────────────────
+# Inbox drainer — coalesce rajadas (anti-spam reply)
+# Lead manda 3 msgs em sequência → bot espera, junta, responde TUDO em 1 turno.
+# ────────────────────────────────────────────────────────────────────
+
+# Tempo em segundos que o inbox precisa ficar IDLE (sem nova msg) pra ser drenado.
+# 6s ~ pausa típica de digitação. Menor = arrisca cortar burst. Maior = lentidão.
+INBOX_DEBOUNCE_S = float(os.getenv("INBOX_DEBOUNCE_S", "6"))
+# Safety: tempo MÁX que msg pode ficar no inbox (mesmo se user continua mandando).
+# Após esse limite, força drain — evita lead spammer travar resposta indefinidamente.
+INBOX_MAX_AGE_S = float(os.getenv("INBOX_MAX_AGE_S", "20"))
+# Drain imediato se inbox atingir esse tamanho (rajada muito grande).
+INBOX_MAX_SIZE = int(os.getenv("INBOX_MAX_SIZE", "8"))
+# Intervalo de varredura do drainer.
+INBOX_SCAN_INTERVAL_S = float(os.getenv("INBOX_SCAN_INTERVAL_S", "1.5"))
+
+
+async def _inbox_drainer_loop() -> None:
+    """
+    Loop infinito até _worker_stop_evt. Varre inboxes ativos. Pra cada:
+      - inbox idle > INBOX_DEBOUNCE_S → drena + enfileira combined payload
+      - inbox age > INBOX_MAX_AGE_S → força drain (safety)
+      - inbox size >= INBOX_MAX_SIZE → drena imediato
+    """
+    while not _worker_stop_evt.is_set():
+        try:
+            try:
+                inboxes = await redis.list_active_inboxes()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[inbox-drainer] list_active falhou: %s", exc)
+                inboxes = []
+
+            now = time.time()
+            for instance, phone in inboxes:
+                try:
+                    newest_ts = await redis.peek_inbox_newest_ts(instance, phone)
+                    if newest_ts is None:
+                        continue
+                    oldest_ts = await redis.peek_inbox_oldest_ts(instance, phone)
+                    size = await redis.inbox_length(instance, phone)
+
+                    idle = now - newest_ts
+                    age = (now - oldest_ts) if oldest_ts else 0
+                    should_drain = (
+                        idle >= INBOX_DEBOUNCE_S
+                        or age >= INBOX_MAX_AGE_S
+                        or size >= INBOX_MAX_SIZE
+                    )
+                    if not should_drain:
+                        continue
+
+                    items = await redis.drain_inbox(instance, phone)
+                    if not items:
+                        continue
+
+                    # Combina texto (em ordem FIFO, separador claro).
+                    texts: list[str] = []
+                    last_media_mime: str | None = None
+                    last_media_b64: str | None = None
+                    last_message_id: str = ""
+                    push_name = ""
+                    project_id_hint = ""
+                    for it in items:
+                        t = (it.get("text") or "").strip()
+                        if t:
+                            texts.append(t)
+                        if it.get("media_mime"):
+                            last_media_mime = it["media_mime"]
+                            last_media_b64 = it.get("media_base64")
+                        if it.get("message_id"):
+                            last_message_id = it["message_id"]
+                        if it.get("push_name"):
+                            push_name = it["push_name"]
+                        if it.get("project_id_hint"):
+                            project_id_hint = it["project_id_hint"]
+
+                    combined_text = "\n".join(texts) if texts else "[mídia]"
+
+                    payload = {
+                        "kind": "inbound",
+                        "instance": instance,
+                        "phone": phone,
+                        "message_id": last_message_id,
+                        "enqueued_at": time.time(),
+                        "batch_size": len(items),
+                        "initial_state": {
+                            "project_id": project_id_hint or os.getenv("DEFAULT_PROJECT_ID", "padrao"),
+                            "instance_name": instance,
+                            "phone": phone,
+                            "push_name": push_name,
+                            "user_message": combined_text,
+                            "media_mime": last_media_mime,
+                            "media_base64": last_media_b64,
+                            "message_id": last_message_id,
+                            "messages": [],
+                        },
+                    }
+                    qsize = await redis.enqueue_message(payload)
+                    log.info(
+                        "[inbox-drainer] %s/%s drenou %d msgs (idle=%.1fs age=%.1fs size=%d) → queue=%d",
+                        instance, phone, len(items), idle, age, size, qsize,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("[inbox-drainer] erro %s/%s: %s", instance, phone, exc)
+                    continue
+        except asyncio.CancelledError:
+            log.info("[inbox-drainer] cancelado")
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.exception("[inbox-drainer] loop erro: %s", exc)
+
+        try:
+            await asyncio.wait_for(_worker_stop_evt.wait(), timeout=INBOX_SCAN_INTERVAL_S)
+            return  # stop_evt setado
+        except asyncio.TimeoutError:
+            continue
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -637,6 +754,12 @@ async def _process_queued(payload: dict[str, Any]) -> None:
         return
 
     try:
+        # Propaga batch_size do payload pro initial_state — respond_node usa
+        # pra ajustar prompt ("user mandou N msgs, responde tudo em 4 bolhas")
+        batch_size = int(payload.get("batch_size") or 1)
+        if batch_size > 1:
+            initial_state["batch_size"] = batch_size
+
         thread_id = thread_id_for(project_id_hint, instance, phone)
         final_state = await _run_graph_streaming(initial_state, thread_id)
         log.info(

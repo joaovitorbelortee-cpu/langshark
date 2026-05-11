@@ -95,3 +95,6 @@ class SalesState(TypedDict):
 
     # Debug — quando True, send_node não envia pra Evolution (modo simulate)
     _debug_no_send: NotRequired[bool]
+
+    # Batch coalescing — quantas msgs do user foram juntadas neste turno (>=2 = rajada)
+    batch_size: NotRequired[int]

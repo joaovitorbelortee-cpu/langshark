@@ -483,6 +483,116 @@ class RedisStore:
         return []
 
     # ────────────────────────────────────────────────────────────
+    # Inbox per-lead — coalescing de rajada (debounce N segundos)
+    # Lead manda 3 msgs em sequência → bot espera, junta, responde TUDO em 1 turno.
+    # ────────────────────────────────────────────────────────────
+
+    _INBOX_TTL = 60 * 10  # 10 min — safety
+    _INBOX_INDEX_KEY = "inbox:index"  # set de keys com inbox ativo
+
+    def _inbox_key(self, instance: str, phone: str) -> str:
+        return f"inbox:{instance}:{phone}"
+
+    async def push_inbox(
+        self,
+        instance: str,
+        phone: str,
+        item: dict[str, Any],
+    ) -> int:
+        """LPUSH item no inbox do lead + adiciona key ao índice. Retorna tamanho."""
+        key = self._inbox_key(instance, phone)
+        raw = json.dumps(item)
+        size = await self._cmd("LPUSH", key, raw)
+        await self._cmd("EXPIRE", key, str(self._INBOX_TTL))
+        # Adiciona ao índice (LREM antes evita duplicata)
+        try:
+            await self._cmd("LREM", self._INBOX_INDEX_KEY, "0", key)
+        except Exception:  # noqa: BLE001
+            pass
+        await self._cmd("LPUSH", self._INBOX_INDEX_KEY, key)
+        await self._cmd("EXPIRE", self._INBOX_INDEX_KEY, str(self._INBOX_TTL))
+        try:
+            return int(size) if size is not None else 0
+        except (TypeError, ValueError):
+            return 0
+
+    async def peek_inbox_newest_ts(self, instance: str, phone: str) -> float | None:
+        """Timestamp da msg MAIS RECENTE (LINDEX 0 — head da list)."""
+        key = self._inbox_key(instance, phone)
+        raw = await self._cmd("LINDEX", key, "0")
+        if not isinstance(raw, str):
+            return None
+        try:
+            item = json.loads(raw)
+            ts = item.get("ts")
+            return float(ts) if ts is not None else None
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return None
+
+    async def peek_inbox_oldest_ts(self, instance: str, phone: str) -> float | None:
+        """Timestamp da msg mais ANTIGA (LINDEX -1 — tail)."""
+        key = self._inbox_key(instance, phone)
+        raw = await self._cmd("LINDEX", key, "-1")
+        if not isinstance(raw, str):
+            return None
+        try:
+            item = json.loads(raw)
+            ts = item.get("ts")
+            return float(ts) if ts is not None else None
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return None
+
+    async def inbox_length(self, instance: str, phone: str) -> int:
+        try:
+            res = await self._cmd("LLEN", self._inbox_key(instance, phone))
+            return int(res or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    async def drain_inbox(self, instance: str, phone: str) -> list[dict[str, Any]]:
+        """Pega TODOS items + apaga key. FIFO order (oldest first)."""
+        key = self._inbox_key(instance, phone)
+        raw = await self._cmd("LRANGE", key, "0", "-1")
+        await self._cmd("DEL", key)
+        if not isinstance(raw, list):
+            return []
+        # Redis LPUSH coloca no head → LRANGE 0 → newest first. Inverte pra FIFO.
+        items: list[dict[str, Any]] = []
+        for r in reversed(raw):
+            if not isinstance(r, str):
+                continue
+            try:
+                items.append(json.loads(r))
+            except (json.JSONDecodeError, TypeError):
+                continue
+        # Remove key do índice
+        try:
+            await self._cmd("LREM", self._INBOX_INDEX_KEY, "0", key)
+        except Exception:  # noqa: BLE001
+            pass
+        return items
+
+    async def list_active_inboxes(self) -> list[tuple[str, str]]:
+        """Retorna [(instance, phone), ...] de todos inboxes com msgs pendentes."""
+        raw = await self._cmd("LRANGE", self._INBOX_INDEX_KEY, "0", "-1")
+        if not isinstance(raw, list):
+            return []
+        out: list[tuple[str, str]] = []
+        seen = set()
+        for k in raw:
+            if not isinstance(k, str) or not k.startswith("inbox:"):
+                continue
+            parts = k.split(":", 2)
+            if len(parts) != 3:
+                continue
+            tup = (parts[1], parts[2])
+            if tup in seen:
+                continue
+            seen.add(tup)
+            out.append(tup)
+        return out
+
+    # ────────────────────────────────────────────────────────────
     # Lead status registry — alimentado pelo strategist, lido pelo painel
     # ────────────────────────────────────────────────────────────
 

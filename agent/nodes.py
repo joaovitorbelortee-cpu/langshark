@@ -288,6 +288,7 @@ def _build_system_prompt(
     supervisor_feedback: str | None = None,
     episodic_examples: str = "",
     procedural_lessons: str = "",
+    batch_size: int = 1,
 ) -> str:
     """
     Compõe system prompt = base + foco + lead_facts (CRÍTICO anti-amnésia) +
@@ -310,6 +311,17 @@ def _build_system_prompt(
         facts_block = format_for_prompt(lead_facts)
         if facts_block:
             prompt += "\n\n" + facts_block
+
+    if batch_size and batch_size > 1:
+        prompt += (
+            f"\n\n<rajada_do_lead>\n"
+            f"O cliente enviou {batch_size} mensagens em rajada (chegaram juntas).\n"
+            "RESPONDA TUDO de uma vez, em NO MÁXIMO 4 bolhas curtas. NÃO faça "
+            "uma resposta separada pra cada dúvida — JUNTE os pontos relacionados "
+            "numa única mensagem coerente. Priorize a dúvida principal e cobre "
+            "as secundárias em 1-2 frases.\n"
+            "</rajada_do_lead>"
+        )
 
     if specialist_focus:
         prompt += "\n\n<foco_deste_turno>\n" + specialist_focus + "\n</foco_deste_turno>"
@@ -723,6 +735,7 @@ async def respond_node(state: SalesState) -> dict[str, Any]:
         supervisor_feedback=state.get("supervisor_feedback"),
         episodic_examples=episodic,
         procedural_lessons=lessons,
+        batch_size=int(state.get("batch_size") or 1),
     )
 
     messages: list[Any] = [SystemMessage(content=system_prompt)]
@@ -796,6 +809,7 @@ async def close_sale_node(state: SalesState) -> dict[str, Any]:
         supervisor_feedback=state.get("supervisor_feedback"),
         episodic_examples=episodic,
         procedural_lessons=lessons,
+        batch_size=int(state.get("batch_size") or 1),
     )
 
     messages: list[Any] = [SystemMessage(content=system)]
@@ -1036,6 +1050,7 @@ async def _run_specialist(
         lead_facts=state.get("lead_facts"),
         supervisor_feedback=state.get("supervisor_feedback"),
         procedural_lessons=lessons,
+        batch_size=int(state.get("batch_size") or 1),
     )
 
     messages: list[Any] = [SystemMessage(content=system)]
