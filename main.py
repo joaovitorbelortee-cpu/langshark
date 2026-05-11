@@ -314,10 +314,12 @@ def _extract_media(message: dict, body_data: dict) -> dict | None:
 # ────────────────────────────────────────────────────────────────────
 
 _TRACED_NODES = {
-    "tenant_resolver", "load_history", "summarize", "vision",
-    "detect_intent", "retrieve_for_close", "retrieve_for_respond",
+    "tenant_resolver", "load_system_prompt", "load_history", "summarize",
+    "vision", "detect_intent", "lead_memory",
+    "retrieve_for_close", "retrieve_for_respond",
     "close_sale", "respond", "greeting", "objection", "follow_up",
-    "flow_executor", "persist", "send",
+    "flow_executor", "tools", "supervisor", "strategist",
+    "persist", "send",
 }
 
 

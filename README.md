@@ -193,11 +193,15 @@ Critical:
 | `WEBHOOK_SECRET` | ✓ | Timing-safe auth on `/webhook/evolution` |
 | `EVOLUTION_API_URL` + `_API_KEY` + `_INSTANCE` | ✓ | WhatsApp bridge |
 | `OPENROUTER_API_KEY` (or `OPENAI_API_KEY`) | ✓ | LLM |
-| `UPSTASH_REDIS_REST_URL` + `_TOKEN` | ✓ | Short memory + lock |
+| `UPSTASH_REDIS_REST_URL` + `_TOKEN` | ✓ | Queue/lock/lead_facts (REST) |
 | `SUPABASE_URL` + `_SERVICE_KEY` | ✓ | Multi-tenant + RAG |
-| `POSTGRES_URL` | recommended | Durable checkpointer (else InMemory) |
+| `REDIS_URL` | recommended | Native TCP Redis → AsyncRedisSaver + AsyncRedisStore (preferred over Postgres) |
+| `POSTGRES_URL` | fallback | AsyncPostgresSaver checkpointer (if REDIS_URL absent) |
+| `STORE_TTL_DAYS` | optional | TTL for AsyncRedisStore items (default 90) |
 | `QSTASH_TOKEN` + `PUBLIC_BASE_URL` | recommended | Follow-up scheduler |
 | `ENABLE_TOOL_CALLS` | optional | Bind `@tool` evolution funcs to LLM |
+| `SUPERVISOR_DISABLED=1` | optional | Disable LLM supervisor (default enabled) |
+| `SUPERVISOR_MODEL` | optional | Model for supervisor (default gpt-4o-mini) |
 
 ---
 

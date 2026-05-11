@@ -98,9 +98,16 @@ AI_MODEL=openai/gpt-4o-mini
 AI_BASE_URL=https://openrouter.ai/api/v1
 AI_REFERRER=https://bot-vendas.up.railway.app
 
-# Redis
+# Redis REST (queue/lock/lead_facts fallback)
 UPSTASH_REDIS_REST_URL=https://...upstash.io
 UPSTASH_REDIS_REST_TOKEN=...
+
+# Redis TCP nativo (recommended — AsyncRedisSaver + AsyncRedisStore)
+# Pega em Upstash → "Connect" tab (rediss://default:senha@host:6379)
+# OU Railway Redis plugin, Redis Cloud, etc.
+# Sem REDIS_URL, sistema usa POSTGRES_URL como checkpointer.
+REDIS_URL=rediss://default:senha@us1-xxx.upstash.io:6379
+STORE_TTL_DAYS=90   # TTL default no Store, refresh on read
 
 # QStash
 QSTASH_TOKEN=...
@@ -111,6 +118,11 @@ PUBLIC_BASE_URL=https://bot-vendas.up.railway.app   # callback target
 SUPABASE_URL=https://<ref>.supabase.co
 SUPABASE_SERVICE_KEY=...
 POSTGRES_URL=postgresql://postgres.<ref>:<senha>@aws-0-...:5432/postgres?sslmode=require
+
+# Supervisor LLM (validador anti-burrice — pode desligar pra debug)
+# SUPERVISOR_DISABLED=1
+# SUPERVISOR_MODEL=openai/gpt-4o-mini
+# SUPERVISOR_MAX_RETRIES=2
 
 # Multi-tenant default
 DEFAULT_PROJECT_ID=padrao
