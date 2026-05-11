@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 
 # Modelo: rápido e barato (decisão estruturada, baixa complexidade)
 STRATEGIST_MODEL = os.getenv("FOLLOWUP_STRATEGIST_MODEL", "openai/gpt-4o-mini")
-STRATEGIST_MAX_ATTEMPTS = int(os.getenv("FOLLOWUP_MAX_ATTEMPTS", "5"))
+STRATEGIST_MAX_ATTEMPTS = int(os.getenv("FOLLOWUP_MAX_ATTEMPTS", "10"))
 STRATEGIST_TIMEOUT = float(os.getenv("FOLLOWUP_STRATEGIST_TIMEOUT", "15"))
 
 

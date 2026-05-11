@@ -604,10 +604,25 @@ async def _process_queued(payload: dict[str, Any]) -> None:
         strategy = final_state.get("follow_up_strategy") or {}
         killswitch = bool(strategy.get("killswitch_permanent"))
 
-        # HARD GATE: 5+ tentativas sem resposta → mata follow-up permanentemente
-        # Strategist roda apenas em inbound (intent != follow_up), então em turnos
-        # de follow_up esta é a única defesa contra loop infinito de follow-ups.
-        FOLLOWUP_MAX_ATTEMPTS = 5
+        # Toggle per-projeto: follow_up_enabled=False desativa follow-ups
+        # sem desativar o bot inteiro (is_active continua separado).
+        try:
+            from panel.cache import get_project_config_cache
+            project_cfg = await get_project_config_cache().get(
+                final_state.get("project_id") or project_id_hint
+            )
+            followup_enabled = project_cfg.get("followup_enabled")
+            if followup_enabled is False:
+                schedule_min = None
+                log.info("[strategist] follow_up_enabled=false → skip schedule %s/%s",
+                         instance, phone)
+        except Exception:  # noqa: BLE001
+            pass
+
+        # HARD GATE: N+ tentativas sem resposta → mata follow-up permanentemente
+        # Strategist agora roda também em follow_up turns, mas este gate é
+        # defesa em profundidade contra LLM/strategist falharem.
+        FOLLOWUP_MAX_ATTEMPTS = int(os.getenv("FOLLOWUP_MAX_ATTEMPTS", "10"))
         if kind == "followup" and attempts_after_incr >= FOLLOWUP_MAX_ATTEMPTS:
             killswitch = True
             schedule_min = None

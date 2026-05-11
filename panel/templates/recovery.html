@@ -3,16 +3,39 @@
 {% block page_title %}Reconquista{% endblock %}
 
 {% block content %}
-<section class="page" x-data="recoveryPage()" x-init="load()">
+<section class="page" x-data="recoveryPage()" x-init="load()"
+         data-project-id="{{ current_project.project_id if current_project else 'padrao' }}"
+         data-followup-enabled="{{ 'true' if config.followup_enabled is not sameas false else 'false' }}">
   <div class="page-head">
     <span class="page-eyebrow">FOLLOW-UP INTELIGENTE</span>
     <h2 class="page-title-large">Reconquista</h2>
     <p class="page-subtitle">Agente analisa temperatura do lead via psicologia comportamental e decide cadência ideal.</p>
   </div>
 
+  <!-- Toggle global ON/OFF -->
+  <div class="cta-card" style="margin-bottom: 20px;">
+    <div class="cta-content">
+      <h3>
+        <span x-show="followupEnabled" style="color: var(--success);">● Follow-up ATIVO</span>
+        <span x-show="!followupEnabled" style="color: var(--text-muted);">○ Follow-up DESATIVADO</span>
+      </h3>
+      <p x-show="followupEnabled">Strategist agenda follow-ups automaticamente. Hard cap <code>10 tentativas</code> antes de LOST.</p>
+      <p x-show="!followupEnabled">Bot NÃO agenda follow-ups. Apenas responde mensagens recebidas. Toggle ON pra reativar.</p>
+    </div>
+    <button class="btn"
+            :class="followupEnabled ? 'btn-secondary' : 'btn-primary'"
+            type="button"
+            @click="toggleFollowup()"
+            :disabled="toggling">
+      <span x-show="!toggling && followupEnabled">⏸ Desativar</span>
+      <span x-show="!toggling && !followupEnabled">▶ Ativar</span>
+      <span x-show="toggling">...</span>
+    </button>
+  </div>
+
   <div class="agent-meta" style="margin-bottom: 20px;">
     <div class="agent-meta-stats">
-      <span class="meta-chip">🧠 Strategist ativo</span>
+      <span class="meta-chip">🧠 Strategist <span x-text="followupEnabled ? 'ativo' : 'pausado'"></span></span>
       <span class="meta-chip">⚡ QStash agendador</span>
       <span class="meta-chip meta-on" x-text="'● ' + leads.length + ' leads rastreados'"></span>
     </div>
@@ -147,10 +170,34 @@
 
 <script>
 function recoveryPage() {
+  const root = document.querySelector('[x-data="recoveryPage()"]');
   return {
     leads: [],
     loading: false,
     filter: '',
+    projectId: root?.dataset.projectId || 'padrao',
+    followupEnabled: root?.dataset.followupEnabled !== 'false',
+    toggling: false,
+
+    async toggleFollowup() {
+      if (this.toggling) return;
+      const next = !this.followupEnabled;
+      this.toggling = true;
+      try {
+        const r = await fetch(`/api/admin/projects/${this.projectId}/config`, {
+          method: 'PATCH',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({followup_enabled: next}),
+        });
+        if (!r.ok) throw new Error('falha');
+        this.followupEnabled = next;
+        showToast(next ? 'Follow-up ATIVADO' : 'Follow-up DESATIVADO', 'success');
+      } catch (e) {
+        showToast('Falha: ' + e.message, 'error');
+      } finally {
+        this.toggling = false;
+      }
+    },
 
     get filteredLeads() {
       if (!this.filter) return this.leads;

@@ -916,7 +916,10 @@ async def follow_up_strategist_node(state: SalesState) -> dict[str, Any]:
     if os.getenv("STRATEGIST_DISABLED") == "1":
         return {}
     intent = state.get("intent") or ""
-    if intent in ("follow_up", "comprou") or state.get("has_converted"):
+    # Pula apenas em comprou — em follow_up roda também pra decidir próximo
+    # intervalo com base em psicologia (não confiar só na tag [AGENDAR:N]
+    # vinda do follow_up_node).
+    if intent == "comprou" or state.get("has_converted"):
         return {}
 
     from agent.follow_up_strategist import classify_lead
@@ -925,18 +928,28 @@ async def follow_up_strategist_node(state: SalesState) -> dict[str, Any]:
     instance = state.get("instance_name", "")
     phone = state.get("phone", "")
 
-    # Lê contador ANTES de classificar (hard cap 5+ depende disso).
-    # Reset acontece SÓ se intent sinalizar engagement real (não basta cliente
-    # mandar "ok"; precisa ser interação substantiva).
+    # Lê contador ANTES de classificar (hard cap depende disso).
     try:
         attempts = await redis.get_followup_attempts(instance, phone)
     except Exception:  # noqa: BLE001
         attempts = 0
 
+    # Em follow_up turn, state.user_message está vazio (bot inicia).
+    # Pega a última mensagem REAL do cliente do histórico pra contexto.
+    last_user_msg = state.get("user_message", "") or ""
+    if not last_user_msg:
+        msgs = state.get("messages") or []
+        for m in reversed(msgs):
+            if getattr(m, "type", "") == "human":
+                content = getattr(m, "content", "")
+                if isinstance(content, str) and content.strip():
+                    last_user_msg = content
+                    break
+
     try:
         decision = await classify_lead(
             messages=state.get("messages") or [],
-            last_user_message=state.get("user_message", ""),
+            last_user_message=last_user_msg,
             attempts_made=attempts,
         )
     except Exception as exc:  # noqa: BLE001

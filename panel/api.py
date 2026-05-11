@@ -194,7 +194,7 @@ async def patch_config(
 ) -> dict[str, Any]:
     if not _user_can_access_project(user, project_id):
         raise HTTPException(status_code=403, detail="Forbidden")
-    allowed = {"agent_name", "ai_model", "ai_temperature", "ai_max_tokens", "is_active", "display_name"}
+    allowed = {"agent_name", "ai_model", "ai_temperature", "ai_max_tokens", "is_active", "display_name", "followup_enabled"}
     payload = {k: v for k, v in body.items() if k in allowed}
     if not payload:
         raise HTTPException(status_code=400, detail="Nenhum campo valido pra atualizar")
