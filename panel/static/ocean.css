@@ -473,6 +473,24 @@ input, textarea { font-family: inherit; font-size: inherit; }
   background: rgba(239, 68, 68, 0.04) !important;
 }
 
+.model-card {
+  position: relative;
+}
+.model-card.model-active {
+  border-color: var(--accent);
+  background: linear-gradient(135deg, var(--bg-card), rgba(34, 211, 238, 0.06));
+  box-shadow: 0 0 0 1px var(--accent), var(--shadow-elev);
+}
+.model-card.model-active::before {
+  content: '';
+  position: absolute;
+  top: 8px; right: 8px;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+}
+
 .section-card-head {
   display: flex; align-items: center; justify-content: space-between;
   margin-bottom: 12px;

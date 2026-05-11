@@ -37,24 +37,81 @@
   </div>
 
   <div class="tabs">
-    <button class="tab tab-active" type="button">💬 Personalidade</button>
-    <button class="tab" type="button">✨ Modelo de IA</button>
+    <button class="tab" :class="activeTab === 'personality' ? 'tab-active' : ''"
+            @click="activeTab = 'personality'" type="button">💬 Personalidade</button>
+    <button class="tab" :class="activeTab === 'model' ? 'tab-active' : ''"
+            @click="activeTab = 'model'" type="button">✨ Modelo de IA</button>
   </div>
 
-  <div class="section-grid">
-    {% for key in ['company_info', 'prices', 'parameters', 'priority_situations'] %}
+  <!-- ─── Tab Personalidade ─── -->
+  <div x-show="activeTab === 'personality'">
+    <div class="section-grid">
+      {% for key in ['company_info', 'prices', 'parameters', 'priority_situations'] %}
+        {% set s = sections.get(key) or {} %}
+        {% include "_section_card.html" %}
+      {% endfor %}
+    </div>
+
+    <div class="section-grid section-grid-full">
+      {% set key = 'knowledge_base' %}
       {% set s = sections.get(key) or {} %}
       {% include "_section_card.html" %}
-    {% endfor %}
+    </div>
+
+    <p class="page-foot-info" style="margin: 12px 0 0;">Clique em qualquer card pra editar. Ctrl/Cmd+S salva.</p>
   </div>
 
-  <div class="section-grid section-grid-full">
-    {% set key = 'knowledge_base' %}
-    {% set s = sections.get(key) or {} %}
-    {% include "_section_card.html" %}
-  </div>
+  <!-- ─── Tab Modelo de IA ─── -->
+  <div x-show="activeTab === 'model'" style="display: none;">
+    <p class="page-subtitle" style="margin-bottom: 16px;">
+      Escolha qual modelo de IA o bot usa. Mudança ativa em ~60s (sem redeploy).
+      Atual: <code x-text="currentModel || 'não definido'"></code>
+    </p>
 
-  <p class="page-foot-info" style="margin: 12px 0 0;">Clique em qualquer card pra editar. Ctrl/Cmd+S salva.</p>
+    {% if not models %}
+    <div class="empty-state">
+      <div class="empty-icon">🤖</div>
+      <h3>Catálogo vazio</h3>
+      <p>Rode <code>python scripts/sync_models_catalog.py</code> pra popular.</p>
+    </div>
+    {% else %}
+    <div class="section-grid">
+      {% for m in models %}
+      <div class="section-card model-card"
+           :class="currentModel === '{{ m.model_id }}' ? 'model-active' : ''"
+           @click="selectModel('{{ m.model_id }}')"
+           role="button" tabindex="0"
+           @keydown.enter.prevent="selectModel('{{ m.model_id }}')"
+           @keydown.space.prevent="selectModel('{{ m.model_id }}')"
+           aria-label="Selecionar modelo {{ m.display_name }}">
+        <div class="section-card-head">
+          <div class="section-card-title">
+            {% if m.provider == 'openai' %}🟢{% elif m.provider == 'anthropic' %}🟣{% elif m.provider == 'google' %}🔵{% elif m.provider == 'deepseek' %}🟡{% else %}⚪{% endif %}
+            <span>{{ m.display_name }}</span>
+          </div>
+          <span class="section-badge {% if m.tier == 'premium' %}badge-filled{% elif m.tier == 'free' %}badge-filled{% else %}badge-empty{% endif %}">
+            {{ m.tier }}
+          </span>
+        </div>
+        <p class="section-preview">
+          <code style="font-size: 11px;">{{ m.model_id }}</code><br/>
+          <span style="color: var(--text-secondary); font-size: 12px;">
+            ⬇ ${{ "%.2f"|format(m.input_price or 0) }}/M
+            · ⬆ ${{ "%.2f"|format(m.output_price or 0) }}/M
+            {% if m.supports_vision %} · 👁 vision{% endif %}
+          </span>
+        </p>
+        <div class="section-foot">
+          <span x-show="currentModel === '{{ m.model_id }}'" style="color: var(--success); font-size: 12px;">✓ Em uso</span>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    <p class="page-foot-info" style="margin: 16px 0 0;">
+      Preços por 1 milhão de tokens. Padrão recomendado: <code>openai/gpt-5.4-nano</code> (balanço custo/qualidade).
+    </p>
+    {% endif %}
+  </div>
 
   <!-- ─── Modal editor ─── -->
   <div class="modal-overlay"
@@ -97,6 +154,8 @@ function agentPage() {
     projectId: document.querySelector('.page').dataset.projectId,
     sections: {{ sections|tojson }},
     total: {{ sections|length }},
+    activeTab: 'personality',
+    currentModel: {{ (config.ai_model or '')|tojson }},
     get filled() {
       return Object.values(this.sections).filter(s => (s.content || '').length > 0).length;
     },
@@ -108,6 +167,24 @@ function agentPage() {
     charCount: 0,
     isDirty: false,
     saving: false,
+
+    async selectModel(model_id) {
+      if (this.currentModel === model_id) return;
+      const prev = this.currentModel;
+      this.currentModel = model_id;
+      try {
+        const r = await fetch(`/api/admin/projects/${this.projectId}/config`, {
+          method: 'PATCH',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ai_model: model_id}),
+        });
+        if (!r.ok) throw new Error('falha');
+        showToast(`Modelo trocado para ${model_id}. Bot usa em < 60s.`, 'success');
+      } catch (e) {
+        this.currentModel = prev;
+        showToast('Falha ao trocar modelo: ' + e.message, 'error');
+      }
+    },
 
     openSection(key) {
       const s = this.sections[key] || {};
