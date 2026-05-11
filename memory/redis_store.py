@@ -386,9 +386,21 @@ class RedisStore:
             return 0
 
     async def requeue_head(self, payload: dict[str, Any]) -> None:
-        """RPUSH — coloca de volta NO FIM (próximo a sair). Usado em lock_held."""
+        """RPUSH — coloca no LADO de saída (próximo a sair via RPOP).
+        Usado pra mensagens PRIORITÁRIAS, NÃO pra lock_held."""
         raw = json.dumps(payload)
         await self._cmd("RPUSH", self._QUEUE_KEY, raw)
+
+    async def defer_message(self, payload: dict[str, Any]) -> None:
+        """LPUSH — coloca no LADO de entrada (novo = sai por ÚLTIMO).
+        Usado em lock_held: processa outros leads primeiro, esse volta depois.
+        Adiciona `deferred_at` pra detectar e descartar se aged too much."""
+        import time as _t
+        deferred_payload = dict(payload)
+        deferred_payload["deferred_at"] = _t.time()
+        deferred_payload["defer_count"] = int(deferred_payload.get("defer_count") or 0) + 1
+        raw = json.dumps(deferred_payload)
+        await self._cmd("LPUSH", self._QUEUE_KEY, raw)
 
     # ────────────────────────────────────────────────────────────
     # Follow-up attempt counter — usado pelo Strategist

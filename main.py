@@ -586,10 +586,29 @@ async def _process_queued(payload: dict[str, Any]) -> None:
     # restart deixe entry duplicada.
     got_lock = await redis.acquire_lock(instance, phone, ttl_seconds=60)
     if not got_lock:
-        # Lock ainda detido — re-enqueue no fim, processa outro lead enquanto isso.
-        log.info("[queue] lock_held %s/%s — re-enqueue", instance, phone)
-        await redis.requeue_head(payload)
-        await asyncio.sleep(1.0)
+        # Smart-lock defer: lock ainda detido → coloca msg no FINAL da queue
+        # (lado de entrada = sai por último). Processa outros leads enquanto
+        # esse lead "descansa". Cap em 5 defers — depois descarta (lead provavelmente
+        # tem worker travado ou lock zumbi).
+        defer_count = int(payload.get("defer_count") or 0)
+        if defer_count >= 5:
+            log.warning(
+                "[queue] %s/%s defer_count=%d exceeded — descartando msg (lock zumbi?)",
+                instance, phone, defer_count,
+            )
+            # Tenta forçar release do lock (zumbi) pra próxima msg dele desbloquear
+            try:
+                await redis.release_lock(instance, phone)
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        log.info(
+            "[queue] lock_held %s/%s — defer pro fim (defer_count=%d, processando outros)",
+            instance, phone, defer_count + 1,
+        )
+        await redis.defer_message(payload)
+        # Pequeno sleep pra evitar burn loop se queue tem só esta msg
+        await asyncio.sleep(0.5)
         return
 
     try:

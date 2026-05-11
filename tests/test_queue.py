@@ -82,6 +82,37 @@ async def test_requeue_head_pops_next(store):
 
 
 # ────────────────────────────────────────────────────────────────────
+# Smart lock: defer_message coloca msg no FIM (sai por último)
+# ────────────────────────────────────────────────────────────────────
+
+async def test_defer_message_goes_to_back(store):
+    """Defer: lead_locked vai pro fim, outros leads processam primeiro."""
+    # a, b foram enqueued primeiro (FIFO, saem nesta ordem)
+    await store.enqueue_message({"id": "a"})
+    await store.enqueue_message({"id": "b"})
+    # locked_lead defer → vai pro fim (LPUSH = newest)
+    await store.defer_message({"id": "locked_lead"})
+    # a deve sair primeiro (oldest), depois b, depois locked_lead
+    assert (await store.dequeue_message())["id"] == "a"
+    assert (await store.dequeue_message())["id"] == "b"
+    last = await store.dequeue_message()
+    assert last["id"] == "locked_lead"
+    assert last["defer_count"] == 1
+    assert "deferred_at" in last
+
+
+async def test_defer_message_increments_count(store):
+    """Defer múltiplas vezes incrementa defer_count."""
+    payload = {"id": "x"}
+    await store.defer_message(payload)
+    out1 = await store.dequeue_message()
+    assert out1["defer_count"] == 1
+    await store.defer_message(out1)
+    out2 = await store.dequeue_message()
+    assert out2["defer_count"] == 2
+
+
+# ────────────────────────────────────────────────────────────────────
 # Concurrency safety — múltiplos enqueue paralelo mantém todas
 # ────────────────────────────────────────────────────────────────────
 

@@ -1077,13 +1077,19 @@ async def supervisor_node(state: SalesState) -> dict[str, Any]:
         # Limpa chunks/reply pra forçar especialista regerar
         patch["reply"] = ""
         patch["chunks"] = []
-    elif not review["approved"]:
-        # Esgotou retries — envia mesmo com warning no log
-        log.warning(
-            "[supervisor] %s/%s max retries (%d) atingido, envia mesmo. reason=%s",
-            state.get("instance_name", "?"), state.get("phone", "?"),
-            SUPERVISOR_MAX_RETRIES, review["reason"],
-        )
+    else:
+        # Approved OU esgotou retries — segue pra strategist.
+        # CRÍTICO: limpa supervisor_feedback/attempts pra não vazar pro próximo
+        # turno (checkpointer persiste o state — feedback velho contaminaria o
+        # respond_node do próximo invoke do graph).
+        if not review["approved"]:
+            log.warning(
+                "[supervisor] %s/%s max retries (%d) atingido, envia mesmo. reason=%s",
+                state.get("instance_name", "?"), state.get("phone", "?"),
+                SUPERVISOR_MAX_RETRIES, review["reason"],
+            )
+        patch["supervisor_feedback"] = ""
+        patch["supervisor_attempts"] = 0
 
     return patch
 

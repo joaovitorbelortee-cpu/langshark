@@ -114,11 +114,19 @@ def _route_after_reply(state: SalesState) -> str:
 def _route_after_supervisor(state: SalesState) -> str:
     """
     Após supervisor avaliar:
-      - rejected + tem retry → volta pro respond_node com feedback
+      - rejected + tem retry pendente → volta pro respond_node com feedback
       - approved OU sem retries → strategist (segue normal)
+
+    Safety: além de checar feedback, valida que supervisor_node de fato setou
+    novos campos de retry (reply foi limpo). Se reply ainda existe = supervisor
+    decidiu seguir (max retries OU approved). Evita loop infinito caso o
+    supervisor_node esqueça de limpar feedback.
     """
     review = state.get("supervisor_review") or {}
-    if not review.get("approved") and state.get("supervisor_feedback"):
+    feedback = state.get("supervisor_feedback")
+    reply = state.get("reply") or ""
+    # Retry só rola se: reprovado + tem feedback + reply foi limpo pelo supervisor
+    if not review.get("approved") and feedback and not reply.strip():
         return "retry_path"
     return "strategist_path"
 
