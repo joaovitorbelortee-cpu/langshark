@@ -355,6 +355,37 @@ class EvolutionClient:
         body = {"readMessages": [{"remoteJid": remote_jid, "id": message_id, "fromMe": False}]}
         return await self._post(f"/chat/markMessageAsRead/{instance}", body)
 
+    async def set_settings(self, instance: str, **settings: Any) -> dict:
+        """
+        Atualiza settings da instância via /settings/set/{instance}.
+
+        Settings relevantes pra blue ticks:
+          - readMessages: True   → bot envia read receipts (✓✓ azul)
+          - alwaysOnline: True   → instance fica online → delivery ✓✓ rápido
+          - readStatus: True     → lê status (stories) — opcional
+          - rejectCall: True     → rejeita chamadas automaticamente
+          - msgCall: str         → msg quando rejeita chamada
+          - groupsIgnore: True   → ignora msgs de grupo
+          - syncFullHistory: False → não sincroniza histórico completo
+
+        Body Evolution v2: dict plano com os campos acima.
+        """
+        return await self._post(f"/settings/set/{instance}", dict(settings))
+
+    async def get_settings(self, instance: str) -> dict:
+        """GET /settings/find/{instance} — retorna config atual."""
+        if not self.base_url:
+            return {"success": False, "error": "EVOLUTION_API_URL não configurada"}
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            r = await client.get(
+                f"{self.base_url}/settings/find/{instance}",
+                headers=self._headers(),
+            )
+            try:
+                return r.json() if r.is_success else {"success": False, "status": r.status_code}
+            except Exception:  # noqa: BLE001
+                return {"success": False, "raw": r.text[:200]}
+
 
 # ────────────────────────────────────────────────────────────────────
 # Simulação de digitação (replica simulateTyping com cps variável)

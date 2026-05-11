@@ -302,14 +302,45 @@ async def create_instance(
         raise HTTPException(status_code=503, detail="EVOLUTION_API_URL ausente")
     import httpx
     async with httpx.AsyncClient(timeout=20.0) as c:
+        # Cria instância com settings humanos já habilitados:
+        # - readMessages: bot envia ✓✓ azul (read receipts)
+        # - alwaysOnline: instance fica online → delivery ✓✓ rápido
+        # - rejectCall: rejeita chamadas (bot não atende voz)
+        # - groupsIgnore: ignora msgs de grupo (anti-spam)
         r = await c.post(
             f"{base_url}/instance/create",
             headers={"apikey": api_key, "Content-Type": "application/json"},
-            json={"instanceName": name, "qrcode": True, "integration": "WHATSAPP-BAILEYS"},
+            json={
+                "instanceName": name,
+                "qrcode": True,
+                "integration": "WHATSAPP-BAILEYS",
+                "readMessages": True,
+                "readStatus": False,
+                "alwaysOnline": True,
+                "rejectCall": True,
+                "msgCall": "No momento não posso atender chamadas. Pode me chamar no chat 🙏",
+                "groupsIgnore": True,
+                "syncFullHistory": False,
+            },
         )
         if not r.is_success:
             raise HTTPException(status_code=r.status_code, detail=r.text[:200])
         evo_payload = r.json()
+        # Garante settings (alguns deploys ignoram campos no create — força via /settings/set)
+        try:
+            await c.post(
+                f"{base_url}/settings/set/{name}",
+                headers={"apikey": api_key, "Content-Type": "application/json"},
+                json={
+                    "readMessages": True,
+                    "alwaysOnline": True,
+                    "rejectCall": True,
+                    "groupsIgnore": True,
+                    "msgCall": "No momento não posso atender chamadas. Pode me chamar no chat 🙏",
+                },
+            )
+        except httpx.HTTPError:
+            pass  # best-effort
     # Bind ao projeto (tabela instance_projects)
     if project_id:
         from panel.repos import _supabase_creds, _headers
@@ -360,6 +391,65 @@ async def get_instance_qr(
             raise HTTPException(status_code=r.status_code, detail=r.text[:200])
         d = r.json()
     return {"ok": True, "qr_base64": d.get("base64"), "code": d.get("code")}
+
+
+@admin_router.post("/instances/{instance_name}/enable-read-receipts")
+async def enable_read_receipts(
+    instance_name: str,
+    user: Annotated[dict[str, Any], Depends(require_admin)],
+) -> dict[str, Any]:
+    """
+    Liga settings humanos numa instância EXISTENTE:
+      - readMessages: True   → ✓✓ azul aparece
+      - alwaysOnline: True   → delivery ✓✓ rápido
+      - rejectCall: True     → rejeita chamadas
+      - groupsIgnore: True   → ignora grupos
+
+    Necessário em instâncias antigas criadas antes do default-on.
+    """
+    base_url, api_key = _evolution_creds()
+    if not base_url:
+        raise HTTPException(status_code=503, detail="EVOLUTION_API_URL ausente")
+    import httpx
+    async with httpx.AsyncClient(timeout=10.0) as c:
+        r = await c.post(
+            f"{base_url}/settings/set/{instance_name}",
+            headers={"apikey": api_key, "Content-Type": "application/json"},
+            json={
+                "readMessages": True,
+                "readStatus": False,
+                "alwaysOnline": True,
+                "rejectCall": True,
+                "msgCall": "No momento não posso atender chamadas. Pode me chamar no chat 🙏",
+                "groupsIgnore": True,
+                "syncFullHistory": False,
+            },
+        )
+        if not r.is_success:
+            raise HTTPException(status_code=r.status_code, detail=r.text[:300])
+        payload = r.json() if r.content else {}
+    await _audit(user, "instance.enable_read_receipts", "evolution_instance", instance_name)
+    return {"ok": True, "instance": instance_name, "evolution": payload}
+
+
+@admin_router.get("/instances/{instance_name}/settings")
+async def get_instance_settings(
+    instance_name: str,
+    user: Annotated[dict[str, Any], Depends(require_admin)],
+) -> dict[str, Any]:
+    """GET settings atuais da instância — útil pra debug."""
+    base_url, api_key = _evolution_creds()
+    if not base_url:
+        raise HTTPException(status_code=503, detail="EVOLUTION_API_URL ausente")
+    import httpx
+    async with httpx.AsyncClient(timeout=8.0) as c:
+        r = await c.get(
+            f"{base_url}/settings/find/{instance_name}",
+            headers={"apikey": api_key},
+        )
+        if not r.is_success:
+            return {"ok": False, "status": r.status_code}
+        return r.json() if r.content else {}
 
 
 @admin_router.get("/instances/{instance_name}/status")

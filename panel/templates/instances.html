@@ -42,9 +42,12 @@
           <br/>
           <small x-text="inst.integration"></small>
         </p>
-        <div class="section-foot" style="gap: 8px;">
+        <div class="section-foot" style="gap: 8px; flex-wrap: wrap;">
           <button class="btn btn-secondary" type="button" style="padding: 6px 12px; font-size: 12px;"
                   @click="showQr(inst.instance_name)">📷 QR</button>
+          <button class="btn btn-secondary" type="button" style="padding: 6px 12px; font-size: 12px;"
+                  @click="enableReadReceipts(inst.instance_name)"
+                  title="Liga ✓✓ azul + sempre online + rejeita chamadas">✓✓ Humanizar</button>
           <button class="btn btn-secondary" type="button" style="padding: 6px 12px; font-size: 12px; color: var(--danger); border-color: rgba(239,68,68,0.30);"
                   @click="removeInst(inst.instance_name)">🗑 Remover</button>
         </div>
@@ -155,6 +158,22 @@ function instancesPage() {
         showToast('Instância removida', 'success');
         await this.load();
       } catch (e) { showToast('Falha: ' + e.message, 'error'); }
+    },
+
+    async enableReadReceipts(name) {
+      try {
+        const r = await fetch(`/api/admin/instances/${name}/enable-read-receipts`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+        });
+        if (!r.ok) {
+          const d = await r.json().catch(() => ({}));
+          throw new Error(d.detail || 'falha');
+        }
+        showToast('Settings humanos ligados (✓✓ azul + always online + rejeita chamadas)', 'success');
+      } catch (e) {
+        showToast('Falha: ' + e.message, 'error');
+      }
     },
   };
 }
