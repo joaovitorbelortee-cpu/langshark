@@ -65,6 +65,10 @@ app = FastAPI(title="bot-vendas", lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+# Painel admin (sub-app montada em /api/admin/* — F1: read-only)
+from panel.api import admin_router  # noqa: E402
+app.include_router(admin_router, prefix="/api/admin")
+
 redis = RedisStore()
 qstash = QStashClient()
 
