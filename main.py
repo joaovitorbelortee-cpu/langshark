@@ -47,11 +47,40 @@ _graph_app: Any | None = None
 _worker_task: asyncio.Task[Any] | None = None
 _worker_stop_evt: asyncio.Event = asyncio.Event()
 
+import random  # noqa: E402
+
 # Tempo máximo (segundos) que uma mensagem pode ficar na fila antes de descartar.
 # Cliente espera 5min sem resposta = melhor descartar que mandar resposta estranha.
 QUEUE_MAX_STALE_SECONDS = int(os.getenv("QUEUE_MAX_STALE_SECONDS", "300"))
 # Intervalo de poll quando queue vazia (Upstash REST não suporta BRPOP).
 QUEUE_POLL_INTERVAL_S = float(os.getenv("QUEUE_POLL_INTERVAL_S", "0.5"))
+
+# ────── Inter-lead delay (anti-spam humano) ──────
+# Pausa randomizada entre processar leads DIFERENTES. Mesmo lead em rajada não
+# sofre delay (continuação natural). Range varia c/ carga da queue:
+#   carga baixa (≤2)   → 1–3 min  (cliente espera pouco)
+#   carga média (3–5)  → 1–4 min  (default)
+#   carga alta (>5)    → 2–5 min  (humano "ocupado" demora mais)
+INTER_LEAD_DELAY_ENABLED = os.getenv("INTER_LEAD_DELAY_ENABLED", "1") == "1"
+INTER_LEAD_LOW_THRESHOLD = int(os.getenv("INTER_LEAD_LOW_THRESHOLD", "2"))
+INTER_LEAD_HIGH_THRESHOLD = int(os.getenv("INTER_LEAD_HIGH_THRESHOLD", "5"))
+INTER_LEAD_LOW_RANGE_S = (60, 180)     # 1-3 min
+INTER_LEAD_NORMAL_RANGE_S = (60, 240)  # 1-4 min
+INTER_LEAD_HIGH_RANGE_S = (120, 300)   # 2-5 min
+
+
+def _calc_inter_lead_delay(qsize: int) -> float:
+    """
+    Retorna sleep em segundos antes de processar próximo lead diferente.
+    Faixa adapta à carga: queue grande = humano "ocupado" demora mais.
+    """
+    if qsize <= INTER_LEAD_LOW_THRESHOLD:
+        lo, hi = INTER_LEAD_LOW_RANGE_S
+    elif qsize > INTER_LEAD_HIGH_THRESHOLD:
+        lo, hi = INTER_LEAD_HIGH_RANGE_S
+    else:
+        lo, hi = INTER_LEAD_NORMAL_RANGE_S
+    return random.uniform(lo, hi)
 
 
 @asynccontextmanager
@@ -457,9 +486,11 @@ async def trigger_followup(request: Request) -> dict:
 async def _queue_worker_loop() -> None:
     """
     Loop infinito até _worker_stop_evt. RPOP da queue, processa, repete.
+    Aplica delay aleatório entre leads DIFERENTES (anti-spam humano).
     Pausa QUEUE_POLL_INTERVAL_S quando queue vazia (Upstash REST não suporta BRPOP).
     """
     backoff = QUEUE_POLL_INTERVAL_S
+    last_processed_phone: str = ""
     while not _worker_stop_evt.is_set():
         try:
             payload = await redis.dequeue_message()
@@ -481,7 +512,32 @@ async def _queue_worker_loop() -> None:
                 )
                 continue
 
+            current_phone = payload.get("phone") or ""
+
+            # Inter-lead delay: só aplica quando trocamos de lead.
+            # Mesmo lead em rajada não pausa (continuação natural da conversa).
+            if (
+                INTER_LEAD_DELAY_ENABLED
+                and last_processed_phone
+                and current_phone
+                and current_phone != last_processed_phone
+            ):
+                qsize_now = await redis.queue_length()
+                delay = _calc_inter_lead_delay(qsize_now)
+                log.info(
+                    "[queue] inter-lead delay %.1fs (qsize=%d, %s→%s)",
+                    delay, qsize_now, last_processed_phone, current_phone,
+                )
+                # Sleep interruptível pelo stop_evt — encerramento limpo
+                try:
+                    await asyncio.wait_for(_worker_stop_evt.wait(), timeout=delay)
+                    # Se chegou aqui, stop_evt setado durante o sleep → sair
+                    return
+                except asyncio.TimeoutError:
+                    pass  # delay completo, segue
+
             await _process_queued(payload)
+            last_processed_phone = current_phone
         except asyncio.CancelledError:
             log.info("[queue] worker cancelado")
             raise
