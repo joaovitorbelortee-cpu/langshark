@@ -3,7 +3,7 @@
 {% block page_title %}Reconquista{% endblock %}
 
 {% block content %}
-<section class="page" x-data="recoveryPage()" x-init="load()"
+<section class="page" x-data="recoveryPage()" x-init="load()" x-cloak
          data-project-id="{{ current_project.project_id if current_project else 'padrao' }}"
          data-followup-enabled="{{ 'true' if config.followup_enabled is not sameas false else 'false' }}">
   <div class="page-head">

@@ -473,6 +473,9 @@ input, textarea { font-family: inherit; font-size: inherit; }
   background: rgba(239, 68, 68, 0.04) !important;
 }
 
+/* ────── Alpine x-cloak: esconde elementos x-show até Alpine processar ────── */
+[x-cloak] { display: none !important; }
+
 .model-card {
   position: relative;
 }

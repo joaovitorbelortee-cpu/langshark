@@ -3,7 +3,7 @@
 {% block page_title %}Agente{% endblock %}
 
 {% block content %}
-<section class="page" x-data="agentPage()" data-project-id="{{ current_project.project_id if current_project else 'padrao' }}">
+<section class="page" x-data="agentPage()" x-cloak data-project-id="{{ current_project.project_id if current_project else 'padrao' }}">
   <div class="page-head">
     <span class="page-eyebrow">CONFIGURAÇÃO</span>
     <h2 class="page-title-large">Cérebro do agente</h2>
