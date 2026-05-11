@@ -6,3 +6,4 @@ __pycache__/
 .env.local
 chroma_db/
 .pytest_cache/
+.qr.html
