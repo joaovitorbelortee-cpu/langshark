@@ -153,6 +153,47 @@ class RedisStore:
                 return 0
             return len(entry[0])
 
+        # ── INCR / DECR / EXPIRE (counter ops) ──
+        if cmd == "INCR":
+            key = parts[1]
+            entry = self._fallback.get(key)
+            current = 0
+            if entry and isinstance(entry[0], (str, int)):
+                try:
+                    current = int(entry[0])
+                except (TypeError, ValueError):
+                    current = 0
+            new_val = current + 1
+            exp = entry[1] if entry else None
+            self._fallback[key] = (str(new_val), exp)
+            return new_val
+
+        if cmd == "DECR":
+            key = parts[1]
+            entry = self._fallback.get(key)
+            current = 0
+            if entry and isinstance(entry[0], (str, int)):
+                try:
+                    current = int(entry[0])
+                except (TypeError, ValueError):
+                    current = 0
+            new_val = current - 1
+            exp = entry[1] if entry else None
+            self._fallback[key] = (str(new_val), exp)
+            return new_val
+
+        if cmd == "EXPIRE":
+            key = parts[1]
+            entry = self._fallback.get(key)
+            if not entry:
+                return 0
+            try:
+                ttl_s = float(parts[2])
+            except (TypeError, ValueError):
+                return 0
+            self._fallback[key] = (entry[0], now + ttl_s)
+            return 1
+
         return None
 
     # ────────────────────────────────────────────────────────────
@@ -292,3 +333,33 @@ class RedisStore:
         """RPUSH — coloca de volta NO FIM (próximo a sair). Usado em lock_held."""
         raw = json.dumps(payload)
         await self._cmd("RPUSH", self._QUEUE_KEY, raw)
+
+    # ────────────────────────────────────────────────────────────
+    # Follow-up attempt counter — usado pelo Strategist
+    # ────────────────────────────────────────────────────────────
+
+    _ATTEMPTS_TTL_SECONDS = 60 * 60 * 24 * 30  # 30 dias
+
+    def _attempts_key(self, instance: str, phone: str) -> str:
+        return f"followup_attempts:{instance}:{phone}"
+
+    async def get_followup_attempts(self, instance: str, phone: str) -> int:
+        raw = await self._cmd("GET", self._attempts_key(instance, phone))
+        try:
+            return int(raw or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    async def increment_followup_attempts(self, instance: str, phone: str) -> int:
+        """INCR + EXPIRE 30 dias. Retorna valor novo."""
+        key = self._attempts_key(instance, phone)
+        new_val = await self._cmd("INCR", key)
+        await self._cmd("EXPIRE", key, str(self._ATTEMPTS_TTL_SECONDS))
+        try:
+            return int(new_val or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    async def reset_followup_attempts(self, instance: str, phone: str) -> None:
+        """Lead respondeu → zera contador (próximo follow-up vai do começo)."""
+        await self._cmd("DEL", self._attempts_key(instance, phone))

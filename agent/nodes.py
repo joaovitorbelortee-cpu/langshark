@@ -848,6 +848,78 @@ async def flow_executor_node(state: SalesState) -> dict[str, Any]:
 # Nó: tenant_resolver (project_id via Supabase instance_projects)
 # ────────────────────────────────────────────────────────────────────
 
+async def follow_up_strategist_node(state: SalesState) -> dict[str, Any]:
+    """
+    Roda DEPOIS dos especialistas (que geraram resposta) e ANTES de persist+send.
+
+    Analisa contexto + classifica temperatura + decide cadência ótima.
+    Sobrescreve state["schedule_minutes"] com decisão baseada em psicologia
+    comportamental (vs. tag [AGENDAR: N] vaga emitida pelo LLM principal).
+
+    Pula:
+      - intent == "follow_up" (bot disparando follow-up — não decide próximo agora)
+      - intent == "comprou"   (lead converteu — sem follow-up)
+      - has_converted == True
+      - STRATEGIST_DISABLED env (tests, dev)
+    """
+    if os.getenv("STRATEGIST_DISABLED") == "1":
+        return {}
+    intent = state.get("intent") or ""
+    if intent in ("follow_up", "comprou") or state.get("has_converted"):
+        return {}
+
+    from agent.follow_up_strategist import classify_lead
+
+    redis = get_redis()
+    instance = state.get("instance_name", "")
+    phone = state.get("phone", "")
+
+    # Lead respondeu → zera contador (próximo follow-up começa do 0)
+    try:
+        await redis.reset_followup_attempts(instance, phone)
+    except Exception:  # noqa: BLE001
+        pass
+
+    attempts = 0  # acabou de resetar
+    try:
+        decision = await classify_lead(
+            messages=state.get("messages") or [],
+            last_user_message=state.get("user_message", ""),
+            attempts_made=attempts,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[strategist] erro inesperado: %s — usando fallback WARM 90min", exc)
+        decision = {
+            "temperatura": "WARM",
+            "razao": f"strategist erro: {exc!s}"[:120],
+            "horario_explicito": None,
+            "agendar_minutos": 90,
+            "abordagem": "valor",
+            "killswitch_permanent": False,
+        }
+
+    log.info(
+        "[strategist] %s/%s temp=%s min=%d abord=%s razao=%s",
+        instance, phone,
+        decision["temperatura"],
+        decision["agendar_minutos"],
+        decision["abordagem"],
+        decision["razao"],
+    )
+
+    patch: dict[str, Any] = {
+        "follow_up_strategy": decision,
+        "follow_up_attempts": attempts,
+    }
+    # Killswitch ou STOP → não agenda
+    if decision["killswitch_permanent"] or decision["agendar_minutos"] <= 0:
+        patch["schedule_minutes"] = None
+    else:
+        patch["schedule_minutes"] = decision["agendar_minutos"]
+
+    return patch
+
+
 async def tenant_resolver_node(state: SalesState) -> dict[str, Any]:
     """
     Se project_id já veio (query string ou injetado), respeita.

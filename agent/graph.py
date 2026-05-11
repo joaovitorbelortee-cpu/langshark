@@ -42,6 +42,7 @@ from agent.nodes import (
     detect_intent_node,
     flow_executor_node,
     follow_up_node,
+    follow_up_strategist_node,
     greeting_node,
     load_history_node,
     load_system_prompt_node,
@@ -117,6 +118,7 @@ def build_graph(checkpointer: Any | None = None):
     g.add_node("follow_up", follow_up_node)
     g.add_node("flow_executor", flow_executor_node)
     g.add_node("tools", ToolNode(EVOLUTION_TOOLS))
+    g.add_node("strategist", follow_up_strategist_node)
     g.add_node("persist", persist_node)
     g.add_node("send", send_node)
 
@@ -147,7 +149,8 @@ def build_graph(checkpointer: Any | None = None):
     g.add_edge("retrieve_for_close", "close_sale")
     g.add_edge("retrieve_for_respond", "respond")
 
-    # Após qualquer nó que produz reply, decide entre tools / fluxo / persistência.
+    # Após qualquer nó que produz reply, decide entre tools / fluxo / strategist.
+    # Strategist sempre roda ANTES de persist (decide próximo follow-up).
     for reply_node in ("close_sale", "respond", "greeting", "objection", "follow_up"):
         g.add_conditional_edges(
             reply_node,
@@ -155,12 +158,13 @@ def build_graph(checkpointer: Any | None = None):
             {
                 "tools_path": "tools",
                 "flow_path": "flow_executor",
-                "persist_path": "persist",
+                "persist_path": "strategist",
             },
         )
 
-    g.add_edge("tools", "persist")
-    g.add_edge("flow_executor", "persist")
+    g.add_edge("tools", "strategist")
+    g.add_edge("flow_executor", "strategist")
+    g.add_edge("strategist", "persist")
     g.add_edge("persist", "send")
     g.add_edge("send", END)
 

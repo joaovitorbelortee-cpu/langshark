@@ -168,3 +168,15 @@ def event_loop():
     loop = asyncio.new_event_loop()
     yield loop
     loop.close()
+
+
+@pytest.fixture(autouse=True)
+def _disable_strategist_in_tests(monkeypatch):
+    """
+    Strategist faz call LLM próprio (separado do FakeLLM em nodes_mod).
+    Em tests sem rede, desabilita pra não tentar HTTP real e manter assertions
+    sobre tags [AGENDAR: N] vindas dos especialistas mockados.
+
+    Tests específicos do strategist usam unit tests diretos em test_followup_strategist.py.
+    """
+    monkeypatch.setenv("STRATEGIST_DISABLED", "1")

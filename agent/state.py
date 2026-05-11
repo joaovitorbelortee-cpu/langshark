@@ -6,7 +6,7 @@ Cada mensagem do WhatsApp instancia um SalesState que percorre os nós
 """
 from __future__ import annotations
 
-from typing import Annotated, Literal, NotRequired, TypedDict
+from typing import Annotated, Any, Literal, NotRequired, TypedDict
 
 from langgraph.graph.message import add_messages
 from langchain_core.messages import BaseMessage
@@ -80,3 +80,7 @@ class SalesState(TypedDict):
     # Resultado do envio
     sent: NotRequired[bool]
     sent_count: NotRequired[int]
+
+    # Follow-up Strategist (preenchido por follow_up_strategist_node)
+    follow_up_strategy: NotRequired[dict[str, Any]]   # {temperatura, razao, abordagem, ...}
+    follow_up_attempts: NotRequired[int]              # nº de followups já enviados sem resposta

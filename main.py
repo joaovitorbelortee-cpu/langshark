@@ -584,10 +584,22 @@ async def _process_queued(payload: dict[str, Any]) -> None:
         except Exception:  # noqa: BLE001
             pass
 
-        # Schedule follow-up se IA pediu E lead não converteu
+        # Se este turno foi follow-up disparado pelo bot, incrementa contador
+        # (próxima decisão do strategist saberá quantas tentativas já houve).
+        if kind == "followup":
+            try:
+                n = await redis.increment_followup_attempts(instance, phone)
+                log.info("[strategist] %s/%s attempts=%d", instance, phone, n)
+            except Exception:  # noqa: BLE001
+                pass
+
+        # Schedule próximo follow-up se IA/strategist pediu E lead não converteu
         schedule_min = final_state.get("schedule_minutes")
         has_converted = final_state.get("has_converted", False)
-        if schedule_min and not has_converted and qstash.enabled:
+        strategy = final_state.get("follow_up_strategy") or {}
+        killswitch = bool(strategy.get("killswitch_permanent"))
+
+        if schedule_min and not has_converted and not killswitch and qstash.enabled:
             r = await qstash.schedule_followup(
                 project_id=final_state.get("project_id") or project_id_hint,
                 instance=instance,
@@ -595,7 +607,14 @@ async def _process_queued(payload: dict[str, Any]) -> None:
                 delay_minutes=schedule_min,
                 push_name=initial_state.get("push_name", ""),
             )
-            log.info("[qstash] schedule_followup → %s", r)
+            log.info(
+                "[qstash] schedule_followup temp=%s abord=%s min=%d → %s",
+                strategy.get("temperatura", "?"),
+                strategy.get("abordagem", "?"),
+                schedule_min, r,
+            )
+        elif killswitch:
+            log.info("[strategist] killswitch ativo %s/%s — não agenda follow-up", instance, phone)
     finally:
         await redis.release_lock(instance, phone)
 
