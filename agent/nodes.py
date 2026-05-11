@@ -286,16 +286,20 @@ def _build_system_prompt(
     specialist_focus: str = "",
     lead_facts: dict[str, Any] | None = None,
     supervisor_feedback: str | None = None,
+    episodic_examples: str = "",
 ) -> str:
     """
     Compõe system prompt = base + foco + lead_facts (CRÍTICO anti-amnésia) +
-    summary + RAG + flows + supervisor_feedback (se retry).
+    summary + RAG + flows + supervisor_feedback (se retry) + episodic examples.
 
     lead_facts: dict estruturado {plataforma, nome, plano_interesse, objecoes, estagio, ...}
                 Renderizado como bloco <lead_conhecido> que instrui bot a NÃO
                 reperguntar dados conhecidos.
     supervisor_feedback: instrução de correção do supervisor quando especialista
                         precisa refazer resposta rejeitada.
+    episodic_examples: few-shot de conversas que CONVERTERAM em situações
+                       similares (Store namespace "wins"). Padrão LangGraph
+                       de Episodic Memory.
     """
     prompt = base_prompt if base_prompt else SALES_SYSTEM
 
@@ -308,6 +312,16 @@ def _build_system_prompt(
 
     if specialist_focus:
         prompt += "\n\n<foco_deste_turno>\n" + specialist_focus + "\n</foco_deste_turno>"
+
+    if episodic_examples:
+        prompt += (
+            "\n\n<conversas_que_converteram>\n"
+            "Aqui estão TRECHOS REAIS de conversas anteriores com leads parecidos "
+            "(mesma plataforma) que TERMINARAM EM VENDA. Use como inspiração de "
+            "TOM e ESTRATÉGIA — NÃO copie literalmente.\n\n"
+            f"{episodic_examples}\n"
+            "</conversas_que_converteram>"
+        )
 
     # Supervisor feedback vai PRÓXIMO do final pra ter mais peso no LLM
     if supervisor_feedback:
@@ -331,6 +345,54 @@ def _build_system_prompt(
     if flows_block:
         prompt += "\n\n" + flows_block
     return prompt
+
+
+async def _fetch_episodic_examples(
+    project_id: str,
+    lead_facts: dict[str, Any] | None,
+    max_examples: int = 2,
+) -> str:
+    """
+    Busca 'wins' anteriores (conversas que converteram) com mesma plataforma
+    do lead atual. Renderiza como few-shot pra prompt.
+
+    Padrão LangGraph Episodic Memory (docs.langchain.com/concepts/memory):
+    few-shot examples são mais eficazes que instruções textuais.
+
+    Retorna "" se store não disponível ou sem matches.
+    """
+    try:
+        from agent.store import get_shared_store
+        store = get_shared_store()
+        if store is None:
+            return ""
+        plataforma = (lead_facts or {}).get("plataforma")
+        # Filter-based search (sem embeddings ainda). Quando habilitar vector index,
+        # trocar pra query semântica baseada no estágio atual.
+        filter_dict: dict[str, Any] = {}
+        if plataforma:
+            filter_dict["plataforma"] = plataforma
+        results = await store.asearch(
+            (project_id, "wins"),
+            filter=filter_dict or None,
+            limit=max_examples,
+        )
+        if not results:
+            return ""
+        parts: list[str] = []
+        for idx, item in enumerate(results, 1):
+            value = getattr(item, "value", None) or {}
+            convo = value.get("conversation") or []
+            if not convo:
+                continue
+            lines = [f"--- Exemplo {idx} (plataforma: {value.get('plataforma', '?')}, plano fechado: {value.get('plano', '?')}) ---"]
+            for turn in convo:
+                lines.append(f"{turn.get('role', '?')}: {turn.get('text', '')}")
+            parts.append("\n".join(lines))
+        return "\n\n".join(parts)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[episodic] fetch falhou: %s", exc)
+        return ""
 
 
 def _detect_flow_patch(project_id: str, raw_reply: str) -> dict[str, Any]:
@@ -551,6 +613,9 @@ async def respond_node(state: SalesState) -> dict[str, Any]:
     """Gera a resposta de vendas, parseia tags, prepara chunks."""
     project_id = state["project_id"]
     catalog_block = get_rag().format_context(state.get("catalog_hits", []) or [])
+    # Episodic memory: busca exemplos de conversas que converteram com leads
+    # similares (mesma plataforma). Padrão LangGraph oficial.
+    episodic = await _fetch_episodic_examples(project_id, state.get("lead_facts"))
     system_prompt = _build_system_prompt(
         catalog_block,
         state.get("summary", ""),
@@ -558,6 +623,7 @@ async def respond_node(state: SalesState) -> dict[str, Any]:
         base_prompt=state.get("system_prompt"),
         lead_facts=state.get("lead_facts"),
         supervisor_feedback=state.get("supervisor_feedback"),
+        episodic_examples=episodic,
     )
 
     messages: list[Any] = [SystemMessage(content=system_prompt)]
@@ -617,6 +683,8 @@ Tag: [AGENDAR: 15] (lead quente). [COMPROU] se confirmou pagamento."""
 async def close_sale_node(state: SalesState) -> dict[str, Any]:
     """Especialista em fechamento — herda SALES_SYSTEM via state['system_prompt']."""
     catalog_block = get_rag().format_context(state.get("catalog_hits", []) or [])
+    # Episodic recall — exemplos de fechamentos passados com leads similares
+    episodic = await _fetch_episodic_examples(state["project_id"], state.get("lead_facts"))
     system = _build_system_prompt(
         catalog_block,
         state.get("summary", ""),
@@ -625,6 +693,7 @@ async def close_sale_node(state: SalesState) -> dict[str, Any]:
         specialist_focus=CLOSE_FOCUS,
         lead_facts=state.get("lead_facts"),
         supervisor_feedback=state.get("supervisor_feedback"),
+        episodic_examples=episodic,
     )
 
     messages: list[Any] = [SystemMessage(content=system)]
@@ -655,7 +724,12 @@ async def close_sale_node(state: SalesState) -> dict[str, Any]:
 # ────────────────────────────────────────────────────────────────────
 
 async def persist_node(state: SalesState) -> dict[str, Any]:
-    """Salva user msg + reply no Redis (formato compat com bot antigo)."""
+    """Salva user msg + reply no Redis (formato compat com bot antigo).
+
+    Também escreve **Episodic Memory** (LangGraph pattern) quando lead converte:
+    salva snippet da conversa que fechou no namespace (project_id, "wins") pro
+    bot aprender com sucessos. Retrieval em retrieve_catalog usa pra few-shot.
+    """
     redis = get_redis()
     if state.get("user_message"):
         await redis.append_message(
@@ -674,6 +748,41 @@ async def persist_node(state: SalesState) -> dict[str, Any]:
             content=state["reply"],
         )
         await redis.set_last_from(state["instance_name"], state["phone"], "agent")
+
+    # Episodic memory: lead converteu? Salva o "win" pro Store.
+    converted = bool(state.get("has_converted")) or state.get("intent") == "comprou"
+    if converted:
+        try:
+            from agent.store import get_shared_store
+            store = get_shared_store()
+            if store is not None:
+                project_id = state.get("project_id", "") or "padrao"
+                phone = state.get("phone", "")
+                # Snapshot últimas 8 mensagens (pré-conversão) — base pro few-shot
+                msgs = state.get("messages") or []
+                snippet = []
+                for m in msgs[-8:]:
+                    role = "AGENT" if getattr(m, "type", "") == "ai" else "CLIENTE"
+                    content = getattr(m, "content", "")
+                    if isinstance(content, str) and content.strip():
+                        snippet.append({"role": role, "text": content[:300]})
+                lead_facts = state.get("lead_facts") or {}
+                import time as _t
+                win_record = {
+                    "phone": phone,
+                    "ts": _t.time(),
+                    "plataforma": lead_facts.get("plataforma"),
+                    "plano": lead_facts.get("plano_interesse"),
+                    "objecoes_superadas": lead_facts.get("objecoes") or [],
+                    "conversation": snippet,
+                }
+                # Key = phone + timestamp pra ser único + sortable
+                key = f"win_{phone}_{int(_t.time())}"
+                await store.aput((project_id, "wins"), key, win_record)
+                log.info("[episodic] win registrado %s/%s key=%s", project_id, phone, key)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[episodic] falha ao registrar win: %s", exc)
+
     return {}
 
 
