@@ -542,13 +542,28 @@ async def respond_node(state: SalesState) -> dict[str, Any]:
 # Nó: close_sale (especialista em fechamento)
 # ────────────────────────────────────────────────────────────────────
 
-CLOSE_FOCUS = """MOMENTO DE FECHAMENTO. O lead demonstrou intenção real de compra.
-Foque em: confirmar produto+valor numa frase curta, pergunta direta de fechamento,
-mandar link de pagamento se ja sabe plataforma+plano. Se houver duvida residual,
-resolva em 1 linha e re-feche. RESPEITE todas as regras gerais ja definidas acima
-(precos exatos, plataforma-first, nao inventar, etc).
+CLOSE_FOCUS = """FECHAMENTO — lead quer comprar. PENSE no momento exato e responda.
 
-Tag: encerre com [AGENDAR: 15] (lead quente). Se cliente confirmou pagamento, use [COMPROU]."""
+NAO USE FRASES PRONTAS. Cada fechamento e diferente — adapte ao lead.
+
+ANTES de escrever, PENSE:
+- Qual plataforma ele tem? (lead_conhecido.plataforma)
+- Qual plano ele perguntou ou voce ofereceu? (plano_interesse)
+- Ele ja recebeu link? Se sim, REFORCE link existente nao mande novo.
+- Ele tem alguma duvida residual? Resolva em 1 linha curta.
+
+PRINCIPIOS:
+- Confirme valor+produto em 1 frase clara (sem ambiguidade).
+- Pergunta de fechamento direta mas natural (nao templated "vamos fechar?").
+- Mande o link CERTO baseado no que ele escolheu.
+
+JAMAIS:
+- Mude o preco que ja foi acordado.
+- Mande link errado de plataforma.
+- Use frase batida tipo "vamos fechar essa?".
+- Invente preco novo.
+
+Tag: [AGENDAR: 15] (lead quente). [COMPROU] se confirmou pagamento."""
 
 
 async def close_sale_node(state: SalesState) -> dict[str, Any]:
@@ -672,47 +687,67 @@ async def vision_node(state: SalesState) -> dict[str, Any]:
 # Especialistas por intenção (cada um com prompt próprio)
 # ────────────────────────────────────────────────────────────────────
 
-GREETING_FOCUS = """MOMENTO DE SAUDACAO.
+GREETING_FOCUS = """SAUDACAO / RETOMADA — analise CONTEXTO antes de qualquer palavra.
 
-CONSULTE o bloco <lead_conhecido> acima (se existir) ANTES de qualquer coisa.
+NAO USE MENSAGENS PRONTAS. Pense no estagio da conversa, no que o lead falou,
+no que voce ja sabe (lead_conhecido) e ESCREVA do zero algo natural.
 
-DOIS CENARIOS POSSIVEIS:
+PRINCIPIOS (nao templates):
+- Cumprimente proporcionalmente: muito casual com lead casual; mais formal se ele e.
+- Se ja sabe alguma coisa do lead (plataforma/nome/plano), USE essa informacao
+  pra mostrar que voce lembra — sem repetir literalmente, integre na fala.
+- Avance no estagio da conversa. NUNCA volte a estagios passados.
+- Se cliente demonstrou confusao, peça desculpa BREVE e continue de onde parou.
+- Se ele ficou em silencio e voltou, retome com algo concreto do contexto, NUNCA
+  generico tipo "como posso te ajudar?".
+- Use o ULTIMO_RESUMO em lead_conhecido pra calibrar onde a conversa parou.
 
-CENARIO A — Lead nunca conversou antes (NADA em <lead_conhecido> OU estagio=descoberta sem nenhum dado):
-  - Seja caloroso ("eai!", "tudo bem?")
-  - Pergunte plataforma se nao souber (regra geral)
-  - Cumprimento + 1 pergunta direta
-
-CENARIO B — Lead ja conversou (tem dados em <lead_conhecido>, plataforma ja descoberta etc):
-  - NAO se apresente de novo, NAO pergunte plataforma de novo, NAO recomece pitch
-  - Cumprimente CURTO ("eai!", "voltou!", "como ta?")
-  - CONTINUE do estagio onde parou. Use "ultimo_resumo" pra retomar.
-  - Exemplos:
-    * estagio=preco → "eai! Tava esperando voce. Decidiu se vai pegar o de 3 meses?"
-    * estagio=objecao → "eai! Pensou melhor sobre o valor?"
-    * estagio=apresentacao → "eai! Lembrou do Game Pass? Posso te mostrar como funciona?"
-
-Se cliente parece confuso ('como assim?', '?', 'nao entendi'): pede desculpa CURTA
-("foi mal, escrevi mal!") + continua de onde parou. NUNCA recomece.
+JAMAIS faca:
+- Pergunta que ja foi respondida ("qual plataforma?" se ja sabe).
+- Apresentacao genérica ("Posso te ajudar?" sem contexto).
+- Pitch de produto se voce ja apresentou.
+- Frases tipicas de bot ("Como posso te ajudar hoje?").
 
 Tag: [AGENDAR: 20]."""
 
 
-OBJECTION_FOCUS = """MOMENTO DE QUEBRA DE OBJECAO. Lead hesitou (caro/vou pensar/nao confio).
-Roteiro:
-1. VALIDA o sentimento ("entendo", "faz sentido")
-2. REFRAME usando as ESCADAS DE PRECO/CONTRA-ARGUMENTOS ja definidas nas regras gerais acima
-3. MICRO-COMPROMISSO sem forcar fechamento
+OBJECTION_FOCUS = """OBJECAO — analise QUAL e a hesitacao real do lead e responda especifico.
 
-NAO invente novos argumentos. Use SO o que esta nas regras gerais.
+NAO USE FRASES PRONTAS. Pense:
+- Qual e a objecao exata (caro, tempo, confianca, alguem decide com ele...)?
+- Ela ja foi tratada antes (lead_conhecido.objecoes)? Se sim, NAO repita argumento.
+- Que angulo NOVO voce pode trazer baseado no que sabe do lead?
+
+PRINCIPIOS:
+1. RECONHECA o sentimento dele com palavras dele (nao "entendo", muito generico).
+2. REFRAME com argumento das regras gerais — mas adaptado ao contexto especifico.
+3. PERGUNTA SUAVE de micro-compromisso (nao force fechamento).
+
+JAMAIS:
+- Invente argumento que nao esta nas regras gerais.
+- Use template tipo "entendo seu lado, mas...".
+- Repita argumento ja tratado nesta conversa.
 
 Tag: [AGENDAR: 60]."""
 
 
-FOLLOW_UP_FOCUS = """MOMENTO DE FOLLOW-UP. Conversa antiga retomando.
-Foque em: usar contexto do historico (Efeito Zeigarnik — pergunta aberta que ficou).
-Nao recomece do zero. Nao re-pergunte o que ja foi respondido.
-Se conversa morreu ha muito tempo, abra com VALOR (reciprocidade) seguindo as regras gerais.
+FOLLOW_UP_FOCUS = """FOLLOW-UP / RETOMADA — bot esta iniciando contato apos pausa.
+
+NAO USE FRASES PRONTAS. Bot real sabe puxar assunto de onde parou.
+
+ANTES de escrever, PENSE:
+- Qual era o ULTIMO assunto (ultimo_resumo em lead_conhecido)?
+- O lead estava em qual estagio?
+- Que pergunta aberta ficou sem resposta (Zeigarnik)?
+- Quanto tempo passou? (se muito, abra com algo de valor antes de pedir)
+
+CADA mensagem deve ser UNICA — escrita pensando NESTE lead. Nada generico.
+
+JAMAIS:
+- "Oi, voce ainda esta interessado?" (genérico, bot).
+- "Como posso te ajudar?" (sem contexto).
+- Recomeçar pitch.
+- Repetir mesma abordagem do follow-up anterior.
 
 Tag: leia temperatura — engajado=[AGENDAR: 15], vago=[AGENDAR: 180], sumiu=[AGENDAR: 1440]."""
 
