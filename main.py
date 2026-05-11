@@ -57,35 +57,51 @@ QUEUE_MAX_STALE_SECONDS = int(os.getenv("QUEUE_MAX_STALE_SECONDS", "300"))
 # Intervalo de poll quando queue vazia (Upstash REST não suporta BRPOP).
 QUEUE_POLL_INTERVAL_S = float(os.getenv("QUEUE_POLL_INTERVAL_S", "0.5"))
 
-# ────── Inter-lead delay (anti-spam humano) ──────
-# Pausa randomizada entre processar leads DIFERENTES. Mesmo lead em rajada não
-# sofre delay (continuação natural). Range varia c/ carga da queue:
-#   carga baixa (≤2)   → 1–3 min  (cliente espera pouco)
-#   carga média (3–5)  → 1–4 min  (default)
-#   carga alta (>5)    → 2–5 min  (humano "ocupado" demora mais)
-# ON por default mas ranges CURTOS — antes 1-5min era demais.
-# Agora 5-45s segundo carga (mantém anti-spam humano sem matar volume).
+# ────── Smart Inter-message Delay (anti-ban gaussian) ──────
+# Pausa entre msgs do bot (não entre leads específicos — bot revezando).
+# Research-based (baileys-antiban + green-api + chatarmin 2025-2026):
+#   - Mínimo 45s entre msgs pra leads diferentes (NUNCA furar)
+#   - Gaussian jitter > uniform (padrão temporal humano)
+#   - Adaptativo por carga (queue size):
+#     calmo (0-2)   → mean=110s std=25s [75, 150]
+#     normal (3-5)  → mean=85s  std=20s [60, 120]
+#     pico (6+)     → mean=65s  std=15s [45, 90]
+#   - HOT lane (lead fechando): mean=60s std=12s [45, 75]
 INTER_LEAD_DELAY_ENABLED = os.getenv("INTER_LEAD_DELAY_ENABLED", "1") == "1"
-INTER_LEAD_LOW_THRESHOLD = int(os.getenv("INTER_LEAD_LOW_THRESHOLD", "2"))
-INTER_LEAD_HIGH_THRESHOLD = int(os.getenv("INTER_LEAD_HIGH_THRESHOLD", "5"))
-# Ranges reduzidos drasticamente — antes 1-5min, agora 5-30s default
-INTER_LEAD_LOW_RANGE_S = (60, 120)     # 1-2 min carga baixa
-INTER_LEAD_NORMAL_RANGE_S = (60, 180)  # 1-3 min carga média
-INTER_LEAD_HIGH_RANGE_S = (90, 240)    # 1.5-4 min carga alta
+
+# Threshold de carga (inclui inbox + queue)
+SCHED_LOW_THRESHOLD = int(os.getenv("SCHED_LOW_THRESHOLD", "2"))
+SCHED_HIGH_THRESHOLD = int(os.getenv("SCHED_HIGH_THRESHOLD", "5"))
+
+# Gaussian: (mean, stddev, hard_min, hard_max). Min sempre >= 45s research-based.
+SCHED_DELAY_CALM = (110.0, 25.0, 75.0, 150.0)
+SCHED_DELAY_NORMAL = (85.0, 20.0, 60.0, 120.0)
+SCHED_DELAY_PEAK = (65.0, 15.0, 45.0, 90.0)
+SCHED_DELAY_HOT = (60.0, 12.0, 45.0, 75.0)
+
+# Estágios que entram em HOT lane (lead quente, prioridade)
+HOT_STAGES = {"preco", "fechamento"}
 
 
-def _calc_inter_lead_delay(qsize: int) -> float:
+def _gauss_delay(profile: tuple[float, float, float, float]) -> float:
+    """Sample delay gaussian clamped pra [hard_min, hard_max]. Anti-ban research-based."""
+    mean, std, lo, hi = profile
+    v = random.gauss(mean, std)
+    return max(lo, min(hi, v))
+
+
+def _calc_inter_lead_delay(qsize: int, hot: bool = False) -> float:
     """
-    Retorna sleep em segundos antes de processar próximo lead diferente.
-    Faixa adapta à carga: queue grande = humano "ocupado" demora mais.
+    Delay entre msgs do bot. Adaptativo por carga + HOT lane.
+    HOT lane (lead fechando) sempre tem mean menor pra preservar emoção.
     """
-    if qsize <= INTER_LEAD_LOW_THRESHOLD:
-        lo, hi = INTER_LEAD_LOW_RANGE_S
-    elif qsize > INTER_LEAD_HIGH_THRESHOLD:
-        lo, hi = INTER_LEAD_HIGH_RANGE_S
-    else:
-        lo, hi = INTER_LEAD_NORMAL_RANGE_S
-    return random.uniform(lo, hi)
+    if hot:
+        return _gauss_delay(SCHED_DELAY_HOT)
+    if qsize <= SCHED_LOW_THRESHOLD:
+        return _gauss_delay(SCHED_DELAY_CALM)
+    if qsize > SCHED_HIGH_THRESHOLD:
+        return _gauss_delay(SCHED_DELAY_PEAK)
+    return _gauss_delay(SCHED_DELAY_NORMAL)
 
 
 @asynccontextmanager
@@ -542,10 +558,19 @@ INBOX_SCAN_INTERVAL_S = float(os.getenv("INBOX_SCAN_INTERVAL_S", "1.5"))
 
 async def _inbox_drainer_loop() -> None:
     """
-    Loop infinito até _worker_stop_evt. Varre inboxes ativos. Pra cada:
-      - inbox idle > INBOX_DEBOUNCE_S → drena + enfileira combined payload
-      - inbox age > INBOX_MAX_AGE_S → força drain (safety)
-      - inbox size >= INBOX_MAX_SIZE → drena imediato
+    Smart scheduler — varre inboxes prontos, ranqueia por (HOT lane, wait_time),
+    drena na ordem prioritária e enfileira combined payload com flag `hot`.
+
+    Pra cada inbox:
+      - idle > INBOX_DEBOUNCE_S → pronto pra drain (rajada terminou)
+      - age > INBOX_MAX_AGE_S → força drain (safety)
+      - size >= INBOX_MAX_SIZE → drain imediato
+
+    Ranking dos PRONTOS:
+      1. HOT lane (lead em estagio "preco"/"fechamento") tem prioridade sempre
+      2. Empata? maior wait_time (último resposta do bot foi há mais tempo)
+
+    HOT-lane safety: lead na HOT lane >10min sem fechar volta pra NORMAL (esfriou).
     """
     while not _worker_stop_evt.is_set():
         try:
@@ -556,6 +581,8 @@ async def _inbox_drainer_loop() -> None:
                 inboxes = []
 
             now = time.time()
+            # 1ª passada: filtra apenas inboxes prontos pra drain + coleta priority info
+            ready: list[dict[str, Any]] = []
             for instance, phone in inboxes:
                 try:
                     newest_ts = await redis.peek_inbox_newest_ts(instance, phone)
@@ -574,11 +601,40 @@ async def _inbox_drainer_loop() -> None:
                     if not should_drain:
                         continue
 
+                    # Priority info
+                    estagio = await redis.get_lead_stage(instance, phone) or ""
+                    last_bot_ts = await redis.get_last_bot_reply_ts(instance, phone) or 0.0
+                    wait_time = (now - last_bot_ts) if last_bot_ts else 99999.0
+
+                    # HOT lane com safety: se está há >10min na HOT sem fechar, esfria
+                    hot = estagio in HOT_STAGES and wait_time < 600.0
+
+                    ready.append({
+                        "instance": instance,
+                        "phone": phone,
+                        "estagio": estagio,
+                        "wait_time": wait_time,
+                        "hot": hot,
+                        "size": size,
+                        "idle": idle,
+                        "age": age,
+                    })
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("[inbox-drainer] inspect %s/%s: %s", instance, phone, exc)
+                    continue
+
+            # 2ª passada: ranqueia (HOT primeiro, depois maior wait_time)
+            ready.sort(key=lambda r: (not r["hot"], -r["wait_time"]))
+
+            # 3ª passada: drena na ordem prioritária + enfileira
+            for r in ready:
+                instance, phone = r["instance"], r["phone"]
+                try:
                     items = await redis.drain_inbox(instance, phone)
                     if not items:
                         continue
 
-                    # Combina texto (em ordem FIFO, separador claro).
+                    # Combina texto FIFO + agrega media + extrai meta
                     texts: list[str] = []
                     last_media_mime: str | None = None
                     last_media_b64: str | None = None
@@ -608,6 +664,9 @@ async def _inbox_drainer_loop() -> None:
                         "message_id": last_message_id,
                         "enqueued_at": time.time(),
                         "batch_size": len(items),
+                        "hot": r["hot"],
+                        "estagio": r["estagio"],
+                        "wait_time": r["wait_time"],
                         "initial_state": {
                             "project_id": project_id_hint or os.getenv("DEFAULT_PROJECT_ID", "padrao"),
                             "instance_name": instance,
@@ -622,8 +681,9 @@ async def _inbox_drainer_loop() -> None:
                     }
                     qsize = await redis.enqueue_message(payload)
                     log.info(
-                        "[inbox-drainer] %s/%s drenou %d msgs (idle=%.1fs age=%.1fs size=%d) → queue=%d",
-                        instance, phone, len(items), idle, age, size, qsize,
+                        "[scheduler] %s/%s drenou %d msgs hot=%s wait=%.0fs estagio=%s (idle=%.1fs size=%d) → queue=%d",
+                        instance, phone, len(items), r["hot"], r["wait_time"], r["estagio"] or "?",
+                        r["idle"], r["size"], qsize,
                     )
                 except Exception as exc:  # noqa: BLE001
                     log.warning("[inbox-drainer] erro %s/%s: %s", instance, phone, exc)
@@ -647,12 +707,16 @@ async def _inbox_drainer_loop() -> None:
 
 async def _queue_worker_loop() -> None:
     """
-    Loop infinito até _worker_stop_evt. RPOP da queue, processa, repete.
-    Aplica delay aleatório entre leads DIFERENTES (anti-spam humano).
-    Pausa QUEUE_POLL_INTERVAL_S quando queue vazia (Upstash REST não suporta BRPOP).
+    Smart worker — drena queue, aplica delay gaussian adaptativo entre msgs.
+
+    Delay sempre aplicado entre msgs (não só leads diferentes — bot revezando):
+      - HOT lane: 45-75s (lead fechando, urgência)
+      - Calmo: 75-150s
+      - Normal: 60-120s
+      - Pico: 45-90s
     """
     backoff = QUEUE_POLL_INTERVAL_S
-    last_processed_phone: str = ""
+    msgs_processed = 0  # contador pra detectar 1ª msg (sem delay inicial)
     while not _worker_stop_evt.is_set():
         try:
             payload = await redis.dequeue_message()
@@ -675,35 +739,27 @@ async def _queue_worker_loop() -> None:
                 continue
 
             current_phone = payload.get("phone") or ""
+            is_hot = bool(payload.get("hot"))
 
-            # Inter-lead delay: só aplica quando trocamos de lead.
-            # Mesmo lead em rajada não pausa (continuação natural da conversa).
-            if (
-                INTER_LEAD_DELAY_ENABLED
-                and last_processed_phone
-                and current_phone
-                and current_phone != last_processed_phone
-            ):
+            # Smart delay — entre TODA msg (não só leads diferentes). Bot revezando.
+            # Skip apenas 1ª msg da sessão (sem warm-up).
+            if INTER_LEAD_DELAY_ENABLED and msgs_processed > 0:
                 qsize_now = await redis.queue_length()
-                delay = _calc_inter_lead_delay(qsize_now)
+                delay = _calc_inter_lead_delay(qsize_now, hot=is_hot)
                 log.info(
-                    "[queue] inter-lead delay %.1fs (qsize=%d, %s→%s)",
-                    delay, qsize_now, last_processed_phone, current_phone,
+                    "[scheduler] delay %.1fs (qsize=%d hot=%s phone=%s)",
+                    delay, qsize_now, is_hot, current_phone,
                 )
-                # Sleep interruptível pelo stop_evt — encerramento limpo
                 try:
                     await asyncio.wait_for(_worker_stop_evt.wait(), timeout=delay)
-                    # Se chegou aqui, stop_evt setado durante o sleep → sair
-                    return
+                    return  # stop_evt durante sleep
                 except asyncio.TimeoutError:
-                    pass  # delay completo, segue
+                    pass
 
             try:
                 await _process_queued(payload)
             finally:
-                # Atualiza last_processed_phone MESMO em exceção — evita
-                # delay duplicado se mesma rajada de erro continua.
-                last_processed_phone = current_phone or last_processed_phone
+                msgs_processed += 1
         except asyncio.CancelledError:
             log.info("[queue] worker cancelado")
             raise
@@ -768,6 +824,31 @@ async def _process_queued(payload: dict[str, Any]) -> None:
             final_state.get("intent"),
             final_state.get("sent_count", 0),
         )
+
+        # Smart scheduler tracking: registra estágio quick-access + last_bot_reply
+        try:
+            lead_facts = final_state.get("lead_facts") or {}
+            estagio = lead_facts.get("estagio")
+            if estagio:
+                await redis.set_lead_stage(instance, phone, estagio)
+            if final_state.get("sent_count", 0) > 0 or final_state.get("sent"):
+                await redis.set_last_bot_reply_ts(instance, phone)
+                # Chip quota tracking (anti-ban hard cap)
+                await redis.mark_chip_first_use(instance)
+                qcount = await redis.increment_chip_quota(instance)
+                age_days = await redis.get_chip_age_days(instance)
+                soft_cap = (
+                    50 if age_days < 7 else
+                    200 if age_days < 30 else
+                    500
+                )
+                if qcount >= soft_cap:
+                    log.warning(
+                        "[chip-quota] %s atingiu cap diário (%d/%d, age=%dd) — considere outro chip",
+                        instance, qcount, soft_cap, age_days,
+                    )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[scheduler] tracking falhou %s/%s: %s", instance, phone, exc)
 
         # Marca quem foi o último a falar — KillSwitch usa isso pra cancelar follow-ups
         try:

@@ -593,6 +593,106 @@ class RedisStore:
         return out
 
     # ────────────────────────────────────────────────────────────
+    # Scheduler smart: tracking de wait_time + estagio quick-access
+    # Smart scheduler escolhe próximo lead por (HOT lane, wait_time).
+    # ────────────────────────────────────────────────────────────
+
+    _SCHED_TTL = 60 * 60 * 24 * 7  # 7 dias
+
+    def _last_bot_reply_key(self, instance: str, phone: str) -> str:
+        return f"last_bot_reply:{instance}:{phone}"
+
+    def _lead_stage_key(self, instance: str, phone: str) -> str:
+        return f"lead_stage:{instance}:{phone}"
+
+    async def set_last_bot_reply_ts(self, instance: str, phone: str, ts: float | None = None) -> None:
+        """Marca quando bot mandou última resposta pro lead. Scheduler usa pra wait_time."""
+        import time as _t
+        ts = ts if ts is not None else _t.time()
+        key = self._last_bot_reply_key(instance, phone)
+        await self._cmd("SET", key, str(ts), "EX", str(self._SCHED_TTL))
+
+    async def get_last_bot_reply_ts(self, instance: str, phone: str) -> float | None:
+        raw = await self._cmd("GET", self._last_bot_reply_key(instance, phone))
+        if not raw:
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
+
+    async def set_lead_stage(self, instance: str, phone: str, estagio: str) -> None:
+        """Cache rápido do estagio sem precisar ler lead_facts completo. Scheduler usa pra HOT lane."""
+        if not estagio:
+            return
+        key = self._lead_stage_key(instance, phone)
+        await self._cmd("SET", key, estagio, "EX", str(self._SCHED_TTL))
+
+    async def get_lead_stage(self, instance: str, phone: str) -> str | None:
+        raw = await self._cmd("GET", self._lead_stage_key(instance, phone))
+        if isinstance(raw, str) and raw:
+            return raw
+        return None
+
+    # ──── Chip-level quotas (anti-ban hard cap por instance) ────
+
+    _CHIP_FIRST_USE_TTL = 60 * 60 * 24 * 365  # 1 ano
+    _CHIP_QUOTA_TTL = 60 * 60 * 26            # 26h (cobre dia inteiro + buffer)
+
+    def _chip_first_use_key(self, instance: str) -> str:
+        return f"chip_first_use:{instance}"
+
+    def _chip_quota_key(self, instance: str, date_str: str) -> str:
+        return f"chip_quota:{instance}:{date_str}"
+
+    async def get_chip_age_days(self, instance: str) -> int:
+        """Quantos dias desde o 1º send do chip. 0 se nunca usou."""
+        raw = await self._cmd("GET", self._chip_first_use_key(instance))
+        if not raw:
+            return 0
+        try:
+            import time as _t
+            first_ts = float(raw)
+            age_s = max(0.0, _t.time() - first_ts)
+            return int(age_s / 86400)
+        except (TypeError, ValueError):
+            return 0
+
+    async def mark_chip_first_use(self, instance: str) -> None:
+        """Idempotente — SETNX. Marca dia em que chip começou a operar."""
+        import time as _t
+        await self._cmd(
+            "SET",
+            self._chip_first_use_key(instance),
+            str(_t.time()),
+            "NX",
+            "EX",
+            str(self._CHIP_FIRST_USE_TTL),
+        )
+
+    async def increment_chip_quota(self, instance: str) -> int:
+        """INCR contador do dia. Retorna valor novo."""
+        import time as _t
+        date_str = _t.strftime("%Y-%m-%d", _t.localtime())
+        key = self._chip_quota_key(instance, date_str)
+        new_val = await self._cmd("INCR", key)
+        await self._cmd("EXPIRE", key, str(self._CHIP_QUOTA_TTL))
+        try:
+            return int(new_val)
+        except (TypeError, ValueError):
+            return 0
+
+    async def get_chip_quota(self, instance: str) -> int:
+        """Quantos msgs já mandou hoje."""
+        import time as _t
+        date_str = _t.strftime("%Y-%m-%d", _t.localtime())
+        raw = await self._cmd("GET", self._chip_quota_key(instance, date_str))
+        try:
+            return int(raw or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    # ────────────────────────────────────────────────────────────
     # Lead status registry — alimentado pelo strategist, lido pelo painel
     # ────────────────────────────────────────────────────────────
 

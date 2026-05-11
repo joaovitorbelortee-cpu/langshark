@@ -171,42 +171,53 @@ async def test_dequeue_malformed_returns_none():
 # ────────────────────────────────────────────────────────────────────
 
 def test_inter_lead_delay_low_load(monkeypatch):
-    """Queue pequena → 1-2 min."""
+    """Queue calma (0-2) → gaussian 75-150s."""
     monkeypatch.setenv("WEBHOOK_SECRET", "x" * 32)
     from main import _calc_inter_lead_delay
     for _ in range(20):
         d = _calc_inter_lead_delay(qsize=0)
-        assert 60 <= d <= 120, f"qsize=0 esperado 60-120, got {d}"
+        assert 75 <= d <= 150, f"qsize=0 esperado 75-150, got {d}"
         d = _calc_inter_lead_delay(qsize=2)
-        assert 60 <= d <= 120, f"qsize=2 esperado 60-120, got {d}"
+        assert 75 <= d <= 150, f"qsize=2 esperado 75-150, got {d}"
 
 
 def test_inter_lead_delay_normal_load(monkeypatch):
-    """Queue média → 1-3 min."""
+    """Queue normal (3-5) → gaussian 60-120s."""
     monkeypatch.setenv("WEBHOOK_SECRET", "x" * 32)
     from main import _calc_inter_lead_delay
     for _ in range(20):
         d = _calc_inter_lead_delay(qsize=3)
-        assert 60 <= d <= 180, f"qsize=3 esperado 60-180, got {d}"
+        assert 60 <= d <= 120, f"qsize=3 esperado 60-120, got {d}"
         d = _calc_inter_lead_delay(qsize=5)
-        assert 60 <= d <= 180, f"qsize=5 esperado 60-180, got {d}"
+        assert 60 <= d <= 120, f"qsize=5 esperado 60-120, got {d}"
 
 
 def test_inter_lead_delay_high_load(monkeypatch):
-    """Queue grande → 1.5-4 min."""
+    """Queue pico (6+) → gaussian 45-90s (acelera mas NUNCA fura mínimo 45s)."""
     monkeypatch.setenv("WEBHOOK_SECRET", "x" * 32)
     from main import _calc_inter_lead_delay
     for _ in range(20):
         d = _calc_inter_lead_delay(qsize=6)
-        assert 90 <= d <= 240, f"qsize=6 esperado 90-240, got {d}"
+        assert 45 <= d <= 90, f"qsize=6 esperado 45-90, got {d}"
         d = _calc_inter_lead_delay(qsize=20)
-        assert 90 <= d <= 240, f"qsize=20 esperado 90-240, got {d}"
+        assert 45 <= d <= 90, f"qsize=20 esperado 45-90, got {d}"
+
+
+def test_inter_lead_delay_hot_lane(monkeypatch):
+    """HOT lane (lead fechando) → gaussian 45-75s mesmo no pico."""
+    monkeypatch.setenv("WEBHOOK_SECRET", "x" * 32)
+    from main import _calc_inter_lead_delay
+    for _ in range(20):
+        d = _calc_inter_lead_delay(qsize=0, hot=True)
+        assert 45 <= d <= 75, f"hot calmo esperado 45-75, got {d}"
+        d = _calc_inter_lead_delay(qsize=20, hot=True)
+        assert 45 <= d <= 75, f"hot pico esperado 45-75, got {d}"
 
 
 def test_inter_lead_delay_randomized(monkeypatch):
-    """Múltiplas chamadas com mesmo qsize não devolvem mesmo valor."""
+    """Múltiplas chamadas com mesmo qsize geram valores diferentes (gaussian)."""
     monkeypatch.setenv("WEBHOOK_SECRET", "x" * 32)
     from main import _calc_inter_lead_delay
     samples = [_calc_inter_lead_delay(qsize=4) for _ in range(30)]
-    # Espera variância — pelo menos 10 valores únicos
+    # Gaussian deve produzir variância (gauss não fica preso em valores)
     assert len(set(samples)) >= 10
