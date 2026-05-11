@@ -468,6 +468,10 @@ input, textarea { font-family: inherit; font-size: inherit; }
 }
 .char-over { color: var(--danger) !important; font-weight: 600; }
 .btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none !important; }
+.json-invalid {
+  border: 1px solid var(--danger) !important;
+  background: rgba(239, 68, 68, 0.04) !important;
+}
 
 .section-card-head {
   display: flex; align-items: center; justify-content: space-between;

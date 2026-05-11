@@ -66,19 +66,61 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
+import secrets  # noqa: E402
+
+
+CSRF_COOKIE = "csrftoken"
+CSRF_HEADER = "x-csrf-token"
+_CSRF_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+# Webhooks externos (Evolution, QStash) usam auth via secret e NÃO devem ter CSRF.
+_CSRF_EXEMPT_PATHS = ("/webhook", "/api/trigger-followup", "/health")
+
+
+def _is_csrf_exempt(path: str) -> bool:
+    return any(path.startswith(p) for p in _CSRF_EXEMPT_PATHS)
+
+
 @app.middleware("http")
-async def _security_headers(request: Request, call_next):
+async def _security_and_csrf(request: Request, call_next):
     """
-    Headers de segurança padrão pra todas as respostas.
-    CSP libera Alpine/HTMX/Inter via CDN (necessários pro painel).
+    Combina security headers + CSRF double-submit cookie.
+
+    CSRF: SameSite=strict no cookie session já bloqueia maioria. Token double-submit
+    é defesa secundária pra defesa-em-profundidade contra CSRF + bug em browser legado.
     """
+    path = request.url.path
+    method = request.method.upper()
+
+    # CSRF check em métodos mutantes (POST/PATCH/PUT/DELETE) — exceto webhooks externos.
+    if method not in _CSRF_SAFE_METHODS and not _is_csrf_exempt(path):
+        cookie_token = request.cookies.get(CSRF_COOKIE, "")
+        header_token = request.headers.get(CSRF_HEADER, "")
+        # Login submit (form) usa SameSite=strict como única defesa — exempta primeira chamada.
+        if path == "/admin/login" and method == "POST":
+            pass  # form submit, sem token ainda
+        elif not cookie_token or not header_token or not hmac.compare_digest(cookie_token, header_token):
+            return _json_response(403, {"detail": "CSRF token missing or invalid"})
+
     response = await call_next(request)
+
+    # Emite/renova cookie CSRF em qualquer GET de página HTML (não em JSON APIs).
+    if method in _CSRF_SAFE_METHODS and (path.startswith("/admin") and not path.startswith("/admin/static") and not path.startswith("/api/admin")):
+        if not request.cookies.get(CSRF_COOKIE):
+            response.set_cookie(
+                key=CSRF_COOKIE,
+                value=secrets.token_urlsafe(32),
+                max_age=24 * 3600,
+                httponly=False,  # double-submit precisa ser lido por JS
+                secure=True,
+                samesite="strict",
+                path="/",
+            )
+
+    # Security headers
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
     response.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
-    # CSP só pra rotas do painel HTML — webhooks JSON não precisam.
-    path = request.url.path
     if path.startswith("/admin") and not path.startswith("/admin/static"):
         response.headers.setdefault(
             "Content-Security-Policy",
@@ -91,6 +133,12 @@ async def _security_headers(request: Request, call_next):
             "frame-ancestors 'none'",
         )
     return response
+
+
+def _json_response(status: int, body: dict) -> Any:
+    """Helper minimal pra resposta JSON dentro de middleware (evita import cíclico)."""
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_code=status, content=body)
 
 # Painel admin
 from pathlib import Path  # noqa: E402

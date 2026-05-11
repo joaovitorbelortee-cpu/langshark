@@ -276,3 +276,48 @@ class ProductsRepo(_SupaTable):
             import uuid
             row["id"] = str(uuid.uuid4())
         return await super().insert(row)
+
+
+# ────────────────────────────────────────────────────────────────────
+# AuditLogRepo — registra mutações administrativas
+# ────────────────────────────────────────────────────────────────────
+
+class AuditLogRepo:
+    """
+    Append-only log de mutações via painel admin. Best-effort: falha silenciosa
+    não bloqueia a operação principal (login/PATCH/etc).
+
+    Schema esperado: audit_log(id uuid, ts timestamptz, actor_id text, actor_email text,
+                                action text, target_type text, target_id text, metadata jsonb).
+    """
+
+    async def write(
+        self,
+        actor_id: str,
+        actor_email: str,
+        action: str,
+        target_type: str,
+        target_id: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Schema alinhado com 0003_flows_and_misc.sql: admin_id/admin_email/action/resource_type/resource_id/after_state."""
+        url, _ = _supabase_creds()
+        if not url:
+            return
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as c:
+                await c.post(
+                    f"{url}/rest/v1/audit_log",
+                    headers={**_headers(), "Prefer": "return=minimal"},
+                    json={
+                        "admin_id":      actor_id if actor_id else None,
+                        "admin_email":   actor_email,
+                        "action":        action,
+                        "resource_type": target_type,
+                        "resource_id":   target_id,
+                        "after_state":   metadata or {},
+                    },
+                )
+        except httpx.HTTPError:
+            # Audit log é best-effort — não derruba mutação se Supabase flaky.
+            pass

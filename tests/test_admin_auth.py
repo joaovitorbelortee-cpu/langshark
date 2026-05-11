@@ -146,3 +146,117 @@ def test_cache_evict_empty_no_crash():
     # Não deve crashar mesmo sem entradas
     c._evict_oldest()
     assert c._store == {}
+
+
+# ────────────────────────────────────────────────────────────────────
+# TenantResolver — bounded cache + no anon fallback
+# ────────────────────────────────────────────────────────────────────
+
+def test_tenant_resolver_cache_bounded(monkeypatch):
+    """Cache TTL não cresce além de _CACHE_MAX."""
+    monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_KEY", "fake-service-key")
+    from memory.supabase_tenant import TenantResolver
+    r = TenantResolver()
+    # Override max pra testar rápido
+    r._CACHE_MAX = 4
+    import time
+    for i in range(6):
+        r._cache[f"inst_{i}"] = (f"proj_{i}", time.time() + 60)
+        if len(r._cache) > r._CACHE_MAX:
+            r._evict_oldest()
+    # Após eviction, cache ≤ MAX
+    assert len(r._cache) <= 4
+
+
+def test_tenant_resolver_no_anon_fallback(monkeypatch):
+    """Sem SERVICE_KEY e sem SUPABASE_ALLOW_ANON, key fica vazio."""
+    monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
+    monkeypatch.delenv("SUPABASE_SERVICE_KEY", raising=False)
+    monkeypatch.delenv("SUPABASE_ALLOW_ANON", raising=False)
+    monkeypatch.setenv("SUPABASE_ANON_KEY", "anon-key")
+    from memory.supabase_tenant import TenantResolver
+    r = TenantResolver()
+    assert r.key == ""
+    assert r.enabled is False
+
+
+def test_tenant_resolver_anon_opt_in(monkeypatch):
+    """SUPABASE_ALLOW_ANON=1 permite fallback explícito."""
+    monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
+    monkeypatch.delenv("SUPABASE_SERVICE_KEY", raising=False)
+    monkeypatch.setenv("SUPABASE_ALLOW_ANON", "1")
+    monkeypatch.setenv("SUPABASE_ANON_KEY", "anon-key")
+    from memory.supabase_tenant import TenantResolver
+    r = TenantResolver()
+    assert r.key == "anon-key"
+
+
+# ────────────────────────────────────────────────────────────────────
+# AuditLog — payload schema alinhado com migration 0003
+# ────────────────────────────────────────────────────────────────────
+
+async def test_audit_log_payload_schema(monkeypatch):
+    """AuditLogRepo.write envia payload com campos corretos da migration 0003."""
+    captured: dict = {}
+
+    class FakeResp:
+        def raise_for_status(self): pass
+
+    class FakeClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, headers=None, json=None):
+            captured["url"] = url
+            captured["json"] = json
+            return FakeResp()
+
+    monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_KEY", "fake-key")
+    monkeypatch.setattr("panel.repos.httpx.AsyncClient", FakeClient)
+
+    from panel.repos import AuditLogRepo
+    repo = AuditLogRepo()
+    await repo.write(
+        actor_id="user-1",
+        actor_email="admin@example.com",
+        action="section.patch",
+        target_type="project_config",
+        target_id="padrao",
+        metadata={"section_key": "prices", "size": 1500},
+    )
+    # Campos devem alinhar com schema do 0003_flows_and_misc.sql
+    payload = captured.get("json") or {}
+    assert payload["admin_id"] == "user-1"
+    assert payload["admin_email"] == "admin@example.com"
+    assert payload["action"] == "section.patch"
+    assert payload["resource_type"] == "project_config"
+    assert payload["resource_id"] == "padrao"
+    assert payload["after_state"] == {"section_key": "prices", "size": 1500}
+
+
+async def test_audit_log_no_url_noop(monkeypatch):
+    """Sem SUPABASE_URL, write é no-op (não levanta)."""
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    from panel.repos import AuditLogRepo
+    repo = AuditLogRepo()
+    # Não deve levantar
+    await repo.write("u", "e@x.com", "a", "t", "i")
+
+
+# ────────────────────────────────────────────────────────────────────
+# CSRF middleware — exempt paths + token validation
+# ────────────────────────────────────────────────────────────────────
+
+def test_csrf_exempt_webhook_paths(monkeypatch):
+    """Webhooks externos não passam por CSRF check."""
+    monkeypatch.setenv("WEBHOOK_SECRET", "x" * 32)
+    monkeypatch.setenv("EVOLUTION_API_KEY", "y" * 32)
+    from main import _is_csrf_exempt
+    assert _is_csrf_exempt("/webhook/evolution") is True
+    assert _is_csrf_exempt("/webhook") is True
+    assert _is_csrf_exempt("/api/trigger-followup") is True
+    assert _is_csrf_exempt("/health") is True
+    assert _is_csrf_exempt("/api/admin/projects") is False
+    assert _is_csrf_exempt("/admin/agent") is False

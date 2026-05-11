@@ -6,7 +6,7 @@ Cada mensagem do WhatsApp instancia um SalesState que percorre os nós
 """
 from __future__ import annotations
 
-from typing import Annotated, Literal, TypedDict
+from typing import Annotated, Literal, NotRequired, TypedDict
 
 from langgraph.graph.message import add_messages
 from langchain_core.messages import BaseMessage
@@ -33,46 +33,50 @@ class CatalogHit(TypedDict):
     score: float
 
 
-class SalesState(TypedDict, total=False):
+class SalesState(TypedDict):
+    """
+    Estado completo do grafo. `NotRequired[]` marca campos opcionais explicitamente
+    (Python 3.11+). Campos sem NotRequired devem estar presentes no initial_state.
+    """
     # Identificação multi-tenant (mantém compat com instance_projects do schema antigo)
-    project_id: str          # tenant
-    instance_name: str       # instância Evolution
-    phone: str               # telefone do lead (10–15 dígitos)
-    push_name: str           # nome exibido no WhatsApp
+    project_id: str                    # tenant — sempre presente após tenant_resolver
+    instance_name: str                 # instância Evolution
+    phone: str                         # telefone do lead (10–15 dígitos)
+    push_name: NotRequired[str]        # nome exibido no WhatsApp
 
     # Mensagem corrente
-    user_message: str        # texto recebido (ou caption de mídia)
-    media_mime: str | None   # mimetype quando há mídia
-    media_base64: str | None
+    user_message: str                  # texto recebido (ou caption de mídia)
+    media_mime: NotRequired[str | None]
+    media_base64: NotRequired[str | None]
 
     # Histórico (LangGraph add_messages → append automático sem sobrescrever)
     messages: Annotated[list[BaseMessage], add_messages]
 
     # Roteamento
-    intent: Intent
-    catalog_hits: list[CatalogHit]   # produtos relevantes do RAG
+    intent: NotRequired[Intent]
+    catalog_hits: NotRequired[list[CatalogHit]]
 
     # Saída
-    reply: str                       # resposta final ao cliente (já sem tags)
-    chunks: list[str]                # bolhas para enviar ao WhatsApp
-    has_converted: bool              # tag [COMPROU] detectada
-    schedule_minutes: int | None     # tag [AGENDAR:N] detectada
-    react_emoji: str | None          # tag [REACT:X] detectada
-    quote_previous: bool             # tag [QUOTE] detectada
+    reply: NotRequired[str]
+    chunks: NotRequired[list[str]]
+    has_converted: NotRequired[bool]
+    schedule_minutes: NotRequired[int | None]
+    react_emoji: NotRequired[str | None]
+    quote_previous: NotRequired[bool]
 
-    # System prompt principal (carregado por load_system_prompt_node, herdado por TODOS especialistas)
-    system_prompt: str               # SALES_SYSTEM (Game Pass etc) — fonte única de verdade
+    # System prompt principal (carregado por load_system_prompt_node)
+    system_prompt: NotRequired[str]
 
-    # Memória longa (preenchida por summarize_node quando histórico cresce)
-    summary: str                     # resumo das mensagens antigas
+    # Memória longa
+    summary: NotRequired[str]
 
-    # Fluxo pré-cadastrado detectado pela IA (tag [FLOW: nome])
-    flow_name: str | None            # nome do fluxo a executar
-    flow_dispatched: bool            # send foi feito via flow_executor_node
+    # Fluxo pré-cadastrado (tag [FLOW: nome])
+    flow_name: NotRequired[str | None]
+    flow_dispatched: NotRequired[bool]
 
-    # Tracing (preenchido pelo main durante streaming)
-    message_id: str                  # id Evolution da mensagem do cliente
+    # Tracing
+    message_id: NotRequired[str]
 
-    # Resultado do envio (preenchido por send_node)
-    sent: bool                       # se chunks foram entregues
-    sent_count: int                  # quantas bolhas saíram com sucesso
+    # Resultado do envio
+    sent: NotRequired[bool]
+    sent_count: NotRequired[int]

@@ -20,13 +20,36 @@ from panel.auth import (
     require_admin,
     set_session_cookie,
 )
-from panel.repos import AIModelsCatalogRepo, ProjectConfigRepo
+from panel.repos import AIModelsCatalogRepo, AuditLogRepo, ProjectConfigRepo
 
 
 admin_router = APIRouter()
 _project_repo = ProjectConfigRepo()
 _models_repo = AIModelsCatalogRepo()
+_audit_repo = AuditLogRepo()
 _evo = EvolutionClient()
+
+
+async def _audit(user: dict[str, Any], action: str, target_type: str, target_id: str, **metadata: Any) -> None:
+    """Helper: registra mutação no audit_log. Best-effort, falha silenciosa."""
+    await _audit_repo.write(
+        actor_id=str(user.get("id", "")),
+        actor_email=user.get("email", ""),
+        action=action,
+        target_type=target_type,
+        target_id=target_id,
+        metadata=metadata or None,
+    )
+
+
+# ────────────────────────────────────────────────────────────────────
+# Instances list cache — 10s TTL pra reduzir chamadas Evolution
+# ────────────────────────────────────────────────────────────────────
+
+import time as _time  # noqa: E402
+
+_instances_cache: dict[str, tuple[list[dict[str, Any]], float]] = {}
+_INSTANCES_TTL = 10.0
 
 
 @admin_router.get("/health")
@@ -158,6 +181,8 @@ async def patch_section(
         raise HTTPException(status_code=400, detail="Conteudo > 7000 chars")
     cfg = await _project_repo.patch_section(project_id, section_key, content)
     _invalidate_cache(project_id)
+    await _audit(user, "section.patch", "project_config", project_id,
+                 section_key=section_key, size=len(content))
     return {"ok": True, "section": section_key, "size": len(content), "config": cfg}
 
 
@@ -175,6 +200,7 @@ async def patch_config(
         raise HTTPException(status_code=400, detail="Nenhum campo valido pra atualizar")
     cfg = await _project_repo.patch(project_id, payload)
     _invalidate_cache(project_id)
+    await _audit(user, "config.patch", "project_config", project_id, fields=list(payload.keys()))
     return {"ok": True, "updated": list(payload.keys()), "config": cfg}
 
 
@@ -199,24 +225,43 @@ async def list_instances(
 ) -> list[dict[str, Any]]:
     """
     Lista instâncias da Evolution API + status de conexão.
-    F1: read-only. POST/DELETE em F4.
+    Cache 10s reduz chamadas se UI faz polling.
     """
     base_url = os.getenv("EVOLUTION_API_URL", "").rstrip("/")
     api_key = os.getenv("EVOLUTION_API_KEY", "")
     if not base_url or not api_key:
         return []
 
+    now = _time.monotonic()
+    cached = _instances_cache.get(base_url)
+    if cached and cached[1] > now:
+        return cached[0]
+
     import httpx
-    async with httpx.AsyncClient(timeout=8.0) as c:
+    last_exc: Exception | None = None
+    payload: list[Any] = []
+    # Retry leve: até 2 tentativas com backoff curto
+    for attempt in (1, 2):
         try:
-            r = await c.get(
-                f"{base_url}/instance/fetchInstances",
-                headers={"apikey": api_key},
-            )
-            r.raise_for_status()
-            payload = r.json() or []
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=502, detail=f"Evolution unreachable: {exc}")
+            async with httpx.AsyncClient(timeout=8.0) as c:
+                r = await c.get(
+                    f"{base_url}/instance/fetchInstances",
+                    headers={"apikey": api_key},
+                )
+                r.raise_for_status()
+                payload = r.json() or []
+                last_exc = None
+                break
+        except httpx.HTTPError as exc:
+            last_exc = exc
+            if attempt < 2:
+                import asyncio
+                await asyncio.sleep(0.5)
+    if last_exc is not None:
+        # Serve cache stale se houver, senão 502.
+        if cached:
+            return cached[0]
+        raise HTTPException(status_code=502, detail=f"Evolution unreachable: {last_exc}")
 
     out: list[dict[str, Any]] = []
     for item in payload:
@@ -232,6 +277,7 @@ async def list_instances(
             "profile_pic":   inst.get("profilePicUrl"),
             "integration":   inst.get("integration", "WHATSAPP-BAILEYS"),
         })
+    _instances_cache[base_url] = (out, now + _INSTANCES_TTL)
     return out
 
 
@@ -274,6 +320,9 @@ async def create_instance(
                 headers={**_headers(), "Prefer": "resolution=merge-duplicates"},
                 json={"instance_name": name, "project_id": project_id},
             )
+    # Invalida cache pra próxima list ver a nova instância
+    _instances_cache.clear()
+    await _audit(user, "instance.create", "evolution_instance", name, project_id=project_id)
     qr = (evo_payload.get("qrcode") or {}).get("base64")
     return {"ok": True, "instance_name": name, "qr_base64": qr, "evolution": evo_payload}
 
@@ -293,6 +342,8 @@ async def delete_instance(
         r = await c.delete(f"{base_url}/instance/delete/{instance_name}", headers={"apikey": api_key})
         if r.status_code not in (200, 404):
             raise HTTPException(status_code=r.status_code, detail=r.text[:200])
+    _instances_cache.clear()
+    await _audit(user, "instance.delete", "evolution_instance", instance_name)
     return {"ok": True, "deleted": instance_name}
 
 
@@ -365,6 +416,7 @@ async def create_flow(
         "steps":       body.get("steps") or [],
         "enabled":     body.get("enabled", True),
     })
+    await _audit(user, "flow.create", "flow", str(row.get("id", "")), name=name, project_id=project_id)
     return {"ok": True, "flow": row}
 
 
@@ -377,6 +429,7 @@ async def patch_flow(
     allowed = {"name", "description", "steps", "enabled"}
     payload = {k: v for k, v in body.items() if k in allowed}
     row = await _flows_repo.patch(flow_id, payload)
+    await _audit(user, "flow.patch", "flow", flow_id, fields=list(payload.keys()))
     return {"ok": True, "flow": row}
 
 
@@ -386,6 +439,7 @@ async def delete_flow(
     user: Annotated[dict[str, Any], Depends(require_admin)],
 ) -> dict[str, Any]:
     ok = await _flows_repo.delete(flow_id)
+    await _audit(user, "flow.delete", "flow", flow_id)
     return {"ok": ok}
 
 
@@ -422,6 +476,7 @@ async def create_product(
         "price":       body.get("price"),
         "metadata":    body.get("metadata") or {},
     })
+    await _audit(user, "product.create", "product", str(row.get("id", "")), name=name, project_id=project_id)
     return {"ok": True, "product": row}
 
 
@@ -434,6 +489,7 @@ async def patch_product(
     allowed = {"name", "description", "price", "metadata"}
     payload = {k: v for k, v in body.items() if k in allowed}
     row = await _products_repo.patch(product_id, payload)
+    await _audit(user, "product.patch", "product", product_id, fields=list(payload.keys()))
     return {"ok": True, "product": row}
 
 
@@ -443,4 +499,5 @@ async def delete_product(
     user: Annotated[dict[str, Any], Depends(require_admin)],
 ) -> dict[str, Any]:
     ok = await _products_repo.delete(product_id)
+    await _audit(user, "product.delete", "product", product_id)
     return {"ok": ok}

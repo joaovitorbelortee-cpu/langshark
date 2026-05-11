@@ -22,6 +22,8 @@ log = logging.getLogger(__name__)
 
 
 class TenantResolver:
+    _CACHE_MAX = 512  # evita crescimento ilimitado em caso de muitas instâncias
+
     def __init__(
         self,
         url: str | None = None,
@@ -30,7 +32,12 @@ class TenantResolver:
         timeout: float = 5.0,
     ):
         self.url = (url or os.getenv("SUPABASE_URL", "")).rstrip("/")
-        self.key = service_key or os.getenv("SUPABASE_SERVICE_KEY", "") or os.getenv("SUPABASE_ANON_KEY", "")
+        # anon_key tem privilégio reduzido — instance_projects pode ter RLS service-only.
+        # Permite fallback explícito via SUPABASE_ALLOW_ANON=1 pra dev local.
+        key = (service_key or os.getenv("SUPABASE_SERVICE_KEY", "")).strip()
+        if not key and os.getenv("SUPABASE_ALLOW_ANON") == "1":
+            key = os.getenv("SUPABASE_ANON_KEY", "").strip()
+        self.key = key
         self.timeout = timeout
         self.cache_ttl = cache_ttl_seconds
         self._cache: dict[str, tuple[str | None, float]] = {}
@@ -38,6 +45,12 @@ class TenantResolver:
     @property
     def enabled(self) -> bool:
         return bool(self.url and self.key)
+
+    def _evict_oldest(self) -> None:
+        if not self._cache:
+            return
+        oldest = min(self._cache.items(), key=lambda kv: kv[1][1])
+        self._cache.pop(oldest[0], None)
 
     async def resolve(self, instance_name: str) -> str | None:
         """Devolve project_id ou None."""
@@ -69,9 +82,11 @@ class TenantResolver:
                 r.raise_for_status()
                 data: list[dict[str, Any]] = r.json() or []
                 project_id = data[0]["project_id"] if data else None
-        except Exception as exc:  # noqa: BLE001
+        except (httpx.HTTPError, ValueError, KeyError) as exc:
             log.warning("[tenant] falha ao consultar Supabase: %s", exc)
             project_id = None
 
         self._cache[instance_name] = (project_id, time.time() + self.cache_ttl)
+        if len(self._cache) > self._CACHE_MAX:
+            self._evict_oldest()
         return project_id

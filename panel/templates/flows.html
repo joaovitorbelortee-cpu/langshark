@@ -71,10 +71,14 @@
           <span class="field-label">Passos (JSON array)</span>
           <textarea class="editor-textarea" style="min-height: 220px; border-radius: 8px;"
                     x-model="form.stepsJson"
+                    @input="validateJson()"
+                    :class="{ 'json-invalid': jsonError }"
+                    aria-label="JSON dos passos do fluxo"
                     placeholder='[{"type":"text","content":"Olá!"},{"type":"text","content":"Tudo bem?"}]'></textarea>
-          <small style="color: var(--text-muted); font-size: 11px; margin-top: 4px;">
+          <small x-show="!jsonError" style="color: var(--text-muted); font-size: 11px; margin-top: 4px;">
             Tipos: text/image/video/audio/document. text usa <code>content</code>; mídia usa <code>url</code> + <code>caption</code>.
           </small>
+          <small x-show="jsonError" style="color: var(--danger); font-size: 11px; margin-top: 4px;" x-text="jsonError"></small>
         </label>
         <label style="display: inline-flex; align-items: center; gap: 8px; color: var(--text-secondary);">
           <input type="checkbox" x-model="form.enabled" /> Ativo
@@ -95,7 +99,48 @@ function flowsPage() {
     loading: true,
     editing: false,
     editId: null,
+    jsonError: '',
     form: { name: '', description: '', stepsJson: '[]', enabled: true },
+
+    validateJson() {
+      const txt = this.form.stepsJson.trim();
+      if (!txt) { this.jsonError = ''; return true; }
+      try {
+        const parsed = JSON.parse(txt);
+        if (!Array.isArray(parsed)) {
+          this.jsonError = 'Deve ser um array []';
+          return false;
+        }
+        for (let i = 0; i < parsed.length; i++) {
+          const s = parsed[i];
+          if (!s || typeof s !== 'object') {
+            this.jsonError = `Passo ${i+1}: deve ser objeto {...}`;
+            return false;
+          }
+          if (!s.type) {
+            this.jsonError = `Passo ${i+1}: campo 'type' obrigatório`;
+            return false;
+          }
+          if (!['text', 'image', 'video', 'audio', 'document'].includes(s.type)) {
+            this.jsonError = `Passo ${i+1}: type inválido '${s.type}'`;
+            return false;
+          }
+          if (s.type === 'text' && !s.content) {
+            this.jsonError = `Passo ${i+1}: text precisa de 'content'`;
+            return false;
+          }
+          if (s.type !== 'text' && !s.url) {
+            this.jsonError = `Passo ${i+1}: ${s.type} precisa de 'url'`;
+            return false;
+          }
+        }
+        this.jsonError = '';
+        return true;
+      } catch (e) {
+        this.jsonError = 'JSON inválido: ' + e.message;
+        return false;
+      }
+    },
 
     async load() {
       this.loading = true;
@@ -123,9 +168,15 @@ function flowsPage() {
     },
 
     async save() {
+      if (!this.validateJson()) {
+        return showToast('Corrija o JSON antes de salvar', 'error');
+      }
       let steps;
-      try { steps = JSON.parse(this.form.stepsJson); }
+      try { steps = JSON.parse(this.form.stepsJson || '[]'); }
       catch (e) { return showToast('Steps JSON inválido', 'error'); }
+      if (!this.form.name.trim()) {
+        return showToast('Nome do fluxo obrigatório', 'error');
+      }
       const body = {
         project_id: 'padrao',
         name: this.form.name.trim(),

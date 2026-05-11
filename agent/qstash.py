@@ -88,9 +88,10 @@ class QStashClient:
                 r.raise_for_status()
                 data = r.json() if r.content else {}
                 return {"ok": True, "message_id": data.get("messageId"), "delay_min": delay_minutes}
-        except Exception as exc:  # noqa: BLE001
+        except (httpx.HTTPError, ValueError) as exc:
+            # HTTPError: network/timeout/status; ValueError: JSON decode falhou
             log.warning("[qstash] schedule_followup falhou: %s", exc)
-            return {"ok": False, "error": str(exc)}
+            return {"ok": False, "error": str(exc), "delay_min": delay_minutes}
 
 
 def verify_qstash_signature(_signature: str | None, _body_bytes: bytes) -> bool:
