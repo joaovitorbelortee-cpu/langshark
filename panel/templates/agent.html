@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Agente — LangShark{% endblock %}
+{% block page_title %}Agente{% endblock %}
+
+{% block content %}
+<section class="page">
+  <div class="page-head">
+    <span class="page-eyebrow">CONFIGURAÇÃO</span>
+    <h2 class="page-title-large">Cérebro do agente</h2>
+    <p class="page-subtitle">Configure personalidade, negócio, preços e modelo de IA.</p>
+  </div>
+
+  <div class="agent-meta">
+    <div class="agent-meta-stats">
+      {% set filled = sections.values()|selectattr('content')|list|length %}
+      <span class="meta-chip">📊 {{ filled }}/{{ sections|length }}</span>
+      {% if config.ai_model %}
+      <span class="meta-chip">✨ {{ config.ai_model }}</span>
+      {% endif %}
+      <span class="meta-chip {% if config.is_active %}meta-on{% else %}meta-off{% endif %}">
+        ● {% if config.is_active %}ON{% else %}OFF{% endif %}
+      </span>
+    </div>
+    <a class="btn btn-secondary" href="/admin/settings">🔑 Chaves de API</a>
+  </div>
+
+  <div class="agent-name-row">
+    <label class="field-inline">
+      <span class="field-label">👤 NOME DO AGENTE</span>
+      <input type="text" class="input" value="{{ config.agent_name or '' }}" maxlength="70"
+             placeholder="ex: João" disabled />
+      <span class="char-count">{{ (config.agent_name or '')|length }}/70</span>
+    </label>
+  </div>
+
+  <div class="tabs">
+    <button class="tab tab-active" type="button">💬 Personalidade</button>
+    <button class="tab" type="button">✨ Modelo de IA</button>
+  </div>
+
+  <div class="section-grid">
+    {% for key in ['company_info', 'prices', 'parameters', 'priority_situations'] %}
+      {% set s = sections.get(key) or {} %}
+      {% include "_section_card.html" %}
+    {% endfor %}
+  </div>
+
+  <div class="section-grid section-grid-full">
+    {% set key = 'knowledge_base' %}
+    {% set s = sections.get(key) or {} %}
+    {% include "_section_card.html" %}
+  </div>
+
+  <div class="page-foot-info">
+    <p>F3 ainda em construção: clique nos cards vai abrir o editor CodeMirror.</p>
+  </div>
+</section>
+{% endblock %}

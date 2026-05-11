@@ -1,0 +1,37 @@
+<header class="header">
+  <div class="header-left">
+    <button class="icon-btn" aria-label="Menu" type="button">
+      <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <line x1="3" y1="12" x2="21" y2="12"/>
+        <line x1="3" y1="6" x2="21" y2="6"/>
+        <line x1="3" y1="18" x2="21" y2="18"/>
+      </svg>
+    </button>
+    <h1 class="page-title">{% block page_title %}{{ active_section|capitalize }}{% endblock %}</h1>
+  </div>
+
+  <div class="header-right">
+    {% if current_project and current_project.ai_model %}
+    <a class="model-chip" href="/admin/agent" title="Trocar modelo de IA">
+      <svg class="ico-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+      </svg>
+      <span>{{ current_project.ai_model }}</span>
+    </a>
+    {% endif %}
+
+    {% if user %}
+    <div class="user-menu" x-data="{ open: false }">
+      <button class="user-button" @click="open = !open" type="button">
+        <span class="user-avatar">{{ (user.email or 'A')[0]|upper }}</span>
+        <span class="user-name">{{ user.display_name or user.email or 'admin' }}</span>
+      </button>
+      <div class="user-dropdown" x-show="open" @click.outside="open = false" x-transition>
+        <div class="user-dropdown-email">{{ user.email }}</div>
+        <a class="user-dropdown-item" href="/admin/settings">⚙ Configurações</a>
+        <a class="user-dropdown-item logout" href="/admin/logout">↪ Sair</a>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+</header>

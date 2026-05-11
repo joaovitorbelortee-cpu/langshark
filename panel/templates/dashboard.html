@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — LangShark{% endblock %}
+{% block page_title %}Dashboard{% endblock %}
+
+{% block content %}
+<section class="page">
+  <div class="page-head">
+    <span class="page-eyebrow">VISÃO GERAL</span>
+    <h2 class="page-title-large">Bem-vindo de volta{% if user.display_name %}, {{ user.display_name }}{% endif %}</h2>
+    <p class="page-subtitle">Status das instâncias, conversas e conversões nas últimas 24 horas.</p>
+  </div>
+
+  <div class="kpi-grid">
+    <div class="kpi-card">
+      <div class="kpi-label">Instâncias online</div>
+      <div class="kpi-value">{{ kpis.instances_online }}</div>
+      <div class="kpi-sub">de 1 conectada</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Mensagens 24h</div>
+      <div class="kpi-value">{{ kpis.messages_24h }}</div>
+      <div class="kpi-sub">↗ tracking habilita em F6</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Conversões 24h</div>
+      <div class="kpi-value">{{ kpis.conversions_24h }}</div>
+      <div class="kpi-sub">tag [COMPROU]</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Leads ativos</div>
+      <div class="kpi-value">{{ kpis.active_leads }}</div>
+      <div class="kpi-sub">conversa nas últimas 24h</div>
+    </div>
+  </div>
+
+  <div class="cta-card">
+    <div class="cta-content">
+      <h3>Configure o cérebro do seu agente</h3>
+      <p>Edite personalidade, preços, parâmetros e modelo de IA — sem deploy.</p>
+    </div>
+    <a class="btn btn-primary" href="/admin/agent">Ir para Agente →</a>
+  </div>
+</section>
+{% endblock %}

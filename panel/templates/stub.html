@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}{{ section_title }} — LangShark{% endblock %}
+{% block page_title %}{{ section_title }}{% endblock %}
+
+{% block content %}
+<section class="page">
+  <div class="page-head">
+    <span class="page-eyebrow">EM BREVE</span>
+    <h2 class="page-title-large">{{ section_title }}</h2>
+    <p class="page-subtitle">Esta seção está nos próximos passos do roadmap.</p>
+  </div>
+
+  <div class="empty-state">
+    <div class="empty-icon">🌊</div>
+    <h3>Disponível em F4</h3>
+    <p>F2 entregou login + dashboard. F3 entregará o Cérebro do Agente. Esta seção entra em F4.</p>
+  </div>
+</section>
+{% endblock %}

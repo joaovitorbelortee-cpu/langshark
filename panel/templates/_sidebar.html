@@ -1,0 +1,96 @@
+<aside class="sidebar">
+  <div class="sidebar-brand">
+    <span class="brand-icon">🦈</span>
+    <span class="brand-text">LangShark</span>
+  </div>
+
+  {% if current_project %}
+  <div class="project-switcher" x-data="{ open: false }">
+    <button class="project-button" @click="open = !open" type="button">
+      <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+        <polyline points="9 22 9 12 15 12 15 22"/>
+      </svg>
+      <span class="project-name">{{ current_project.display_name or current_project.project_id }}</span>
+      <svg class="caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polyline points="6 9 12 15 18 9"/>
+      </svg>
+    </button>
+    <div class="project-dropdown" x-show="open" @click.outside="open = false" x-transition>
+      {% for p in projects %}
+        <a class="project-item {% if p.project_id == current_project.project_id %}active{% endif %}"
+           href="?project_id={{ p.project_id }}">
+          {{ p.display_name or p.project_id }}
+        </a>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  <nav class="nav">
+    <div class="nav-group">
+      <div class="nav-label">Operação</div>
+      <a class="nav-item {% if active_section == 'dashboard' %}active{% endif %}" href="/admin">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="3" width="7" height="7"/>
+          <rect x="14" y="3" width="7" height="7"/>
+          <rect x="14" y="14" width="7" height="7"/>
+          <rect x="3" y="14" width="7" height="7"/>
+        </svg>
+        Dashboard
+      </a>
+      <a class="nav-item {% if active_section == 'instances' %}active{% endif %}" href="/admin/instances">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="5" y="2" width="14" height="20" rx="2"/>
+          <line x1="12" y1="18" x2="12" y2="18"/>
+        </svg>
+        Instâncias
+      </a>
+      <a class="nav-item {% if active_section == 'agent' %}active{% endif %}" href="/admin/agent">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="11" width="18" height="10" rx="2"/>
+          <circle cx="12" cy="5" r="2"/>
+          <path d="M12 7v4"/>
+          <line x1="8" y1="16" x2="8" y2="16"/>
+          <line x1="16" y1="16" x2="16" y2="16"/>
+        </svg>
+        Agente
+      </a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-label">Automação</div>
+      <a class="nav-item {% if active_section == 'flows' %}active{% endif %}" href="/admin/flows">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+        </svg>
+        Fluxos Inteligentes
+      </a>
+      <a class="nav-item {% if active_section == 'knowledge' %}active{% endif %}" href="/admin/knowledge">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+          <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+        </svg>
+        Base de Conhecimento
+      </a>
+      <a class="nav-item {% if active_section == 'recovery' %}active{% endif %}" href="/admin/recovery">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="1 4 1 10 7 10"/>
+          <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
+        </svg>
+        Reconquista
+      </a>
+    </div>
+
+    <div class="nav-group">
+      <div class="nav-label">Conta</div>
+      <a class="nav-item {% if active_section == 'settings' %}active{% endif %}" href="/admin/settings">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+        Configurações
+      </a>
+    </div>
+  </nav>
+</aside>

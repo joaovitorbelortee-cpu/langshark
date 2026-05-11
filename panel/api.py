@@ -1,17 +1,25 @@
 """
 Sub-router do painel admin — endpoints JSON sob /api/admin/*.
 
-F1: somente GETs read-only (lista projects, project detail, models catalog, instances).
-F2-F5: PATCH/POST/DELETE + auth.
+F1: GETs read-only.
+F2: + auth (login/logout/me).
+F3-F5: PATCH/POST/DELETE.
 """
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Response
 
 from agent.tools import EvolutionClient
+from panel.auth import (
+    authenticate,
+    clear_session_cookie,
+    create_token,
+    require_admin,
+    set_session_cookie,
+)
 from panel.repos import AIModelsCatalogRepo, ProjectConfigRepo
 
 
@@ -25,6 +33,54 @@ _evo = EvolutionClient()
 async def health() -> dict[str, Any]:
     """Health do sub-app admin (separado do health geral do bot)."""
     return {"ok": True, "scope": "admin"}
+
+
+# ────────────────────────────────────────────────────────────────────
+# Auth (F2)
+# ────────────────────────────────────────────────────────────────────
+
+@admin_router.post("/auth/login")
+async def auth_login(
+    response: Response,
+    body: dict = Body(...),
+) -> dict[str, Any]:
+    email = (body.get("email") or "").strip().lower()
+    password = body.get("password") or ""
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="email e password obrigatorios")
+    user = await authenticate(email, password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Credenciais invalidas")
+    token = create_token(user)
+    set_session_cookie(response, token)
+    return {
+        "ok": True,
+        "user": {
+            "id": user["id"],
+            "email": user["email"],
+            "display_name": user.get("display_name"),
+            "project_ids": user.get("project_ids", []),
+        },
+    }
+
+
+@admin_router.post("/auth/logout")
+async def auth_logout(response: Response) -> dict[str, Any]:
+    clear_session_cookie(response)
+    return {"ok": True}
+
+
+@admin_router.get("/me")
+async def me(
+    user: Annotated[dict[str, Any], Depends(require_admin)],
+) -> dict[str, Any]:
+    return {
+        "id": user["id"],
+        "email": user["email"],
+        "display_name": user.get("display_name"),
+        "project_ids": user.get("project_ids", []),
+        "last_login_at": user.get("last_login_at"),
+    }
 
 
 # ────────────────────────────────────────────────────────────────────

@@ -1,0 +1,62 @@
+<div class="section-card">
+  <div class="section-card-head">
+    <div class="section-card-title">
+      {% set icon = s.get('icon') or 'file' %}
+      {% if icon == 'building' %}
+        <svg class="ico-section" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="4" y="2" width="16" height="20" rx="2"/>
+          <line x1="9" y1="22" x2="9" y2="2"/><line x1="15" y1="22" x2="15" y2="2"/>
+        </svg>
+      {% elif icon == 'dollar' %}
+        <svg class="ico-section" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="12" y1="1" x2="12" y2="23"/>
+          <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>
+        </svg>
+      {% elif icon == 'settings' %}
+        <svg class="ico-section" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/>
+          <line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/>
+          <line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/>
+          <line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/>
+        </svg>
+      {% elif icon == 'alert' %}
+        <svg class="ico-section" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+          <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+        </svg>
+      {% elif icon == 'book' %}
+        <svg class="ico-section" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+          <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+        </svg>
+      {% else %}
+        <svg class="ico-section" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+        </svg>
+      {% endif %}
+      <span>{{ s.get('title') or key }}</span>
+    </div>
+    {% set content = s.get('content') or '' %}
+    {% set max_chars = s.get('max_chars') or 7000 %}
+    {% set is_filled = content|length > 0 %}
+    <span class="section-badge {% if is_filled %}badge-filled{% else %}badge-empty{% endif %}">
+      ● {% if is_filled %}Preenchido{% else %}Vazio{% endif %}
+    </span>
+  </div>
+
+  <p class="section-preview">
+    {% if content %}
+      {{ content[:160] }}{% if content|length > 160 %}…{% endif %}
+    {% else %}
+      <span class="preview-placeholder">FAQ, detalhes de produto, políticas e informações livres.</span>
+    {% endif %}
+  </p>
+
+  <div class="section-progress">
+    <div class="bar" style="width: {{ ((content|length / max_chars * 100)|round(1)) if max_chars else 0 }}%"></div>
+  </div>
+
+  <div class="section-foot">
+    <span class="char-count">{{ content|length }}/{{ max_chars }}</span>
+  </div>
+</div>
