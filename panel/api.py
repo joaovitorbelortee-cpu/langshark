@@ -599,6 +599,56 @@ async def diagnose_instance(
     return report
 
 
+@admin_router.post("/debug/test-redis-url")
+async def test_redis_url(
+    user: Annotated[dict[str, Any], Depends(require_admin)],
+    body: dict = Body(...),
+) -> dict[str, Any]:
+    """
+    Testa REDIS_URL TCP nativo (rediss://...) antes de setar no Railway env.
+    Evita commit-redeploy-debug loop.
+
+    Body: {"url": "rediss://default:senha@host:6379"}
+    Retorna: {ok, latency_ms, error, server_info}
+    """
+    url = (body.get("url") or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="url obrigatória")
+    if not url.startswith(("redis://", "rediss://")):
+        raise HTTPException(status_code=400, detail="URL deve começar com redis:// ou rediss://")
+
+    try:
+        import redis.asyncio as redis_async
+        import time as _t
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"redis-py não instalado: {e}")
+
+    started = _t.time()
+    try:
+        client = redis_async.from_url(url, socket_timeout=8, socket_connect_timeout=8)
+        # Ping + info
+        await client.ping()
+        info_raw = await client.info("server")
+        latency_ms = (_t.time() - started) * 1000.0
+        await client.aclose()
+        srv = {
+            "redis_version": info_raw.get("redis_version") if isinstance(info_raw, dict) else None,
+            "redis_mode": info_raw.get("redis_mode") if isinstance(info_raw, dict) else None,
+        }
+        return {
+            "ok": True,
+            "latency_ms": round(latency_ms, 1),
+            "server": srv,
+            "msg": "Conexão OK. Pode setar REDIS_URL no Railway com essa URL.",
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "ok": False,
+            "error": str(exc)[:300],
+            "msg": "Falhou. Verifica URL/senha. Não setar no Railway ainda.",
+        }
+
+
 # ────────────────────────────────────────────────────────────────────
 # Debug: simular mensagem (testar graph sem WhatsApp)
 # ────────────────────────────────────────────────────────────────────
