@@ -9,14 +9,13 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
+import bcrypt
 from fastapi import Cookie, Depends, HTTPException, Request, Response
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 
 from panel.repos import AdminUsersRepo
 
 
-_pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 _users_repo = AdminUsersRepo()
 
 COOKIE_NAME = "langshark_session"
@@ -36,13 +35,21 @@ def _secret() -> str:
 # Hash + verify
 # ────────────────────────────────────────────────────────────────────
 
+def _bcrypt_bytes(plain: str) -> bytes:
+    """bcrypt aceita no max 72 bytes — corta sem quebrar UTF-8."""
+    return plain.encode("utf-8")[:72]
+
+
 def hash_password(plain: str) -> str:
-    return _pwd_context.hash(plain)
+    hashed = bcrypt.hashpw(_bcrypt_bytes(plain), bcrypt.gensalt(rounds=12))
+    return hashed.decode("utf-8")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
+    if not hashed:
+        return False
     try:
-        return _pwd_context.verify(plain, hashed)
+        return bcrypt.checkpw(_bcrypt_bytes(plain), hashed.encode("utf-8"))
     except Exception:
         return False
 
