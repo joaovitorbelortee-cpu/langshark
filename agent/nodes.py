@@ -127,16 +127,25 @@ def _llm_kwargs_from_state(state: SalesState, default_temp: float = 0.7, default
 # Prompts
 # ────────────────────────────────────────────────────────────────────
 
-INTENT_PROMPT = """Você classifica a INTENÇÃO da última mensagem do cliente em UMA das categorias:
+INTENT_PROMPT = """Você classifica a INTENÇÃO da última mensagem do cliente em UMA das categorias.
 
-- saudacao: cumprimento, "oi", "boa tarde"
-- duvida_produto: pergunta sobre produto, características, como funciona
-- pedir_preco: quer saber valor, quanto custa, formas de pagamento
-- objecao: hesitação, "tá caro", "vou pensar", "depois eu vejo"
-- intencao_compra: quer comprar, fechar, pediu link de pagamento
-- comprou: pagou, mandou comprovante, finalizou
-- follow_up: o cliente está retomando uma conversa antiga
-- outros: qualquer outra coisa
+REGRA CRÍTICA: Classifique baseado no CONTEXTO da conversa, não apenas na frase isolada.
+Uma mesma frase pode ter intenção diferente dependendo do estágio.
+Exemplos:
+  - "oi" SEM histórico = saudacao
+  - "oi" COM histórico de discussão de preço = follow_up (retomada)
+  - "ta caro" no início = objecao
+  - "ta caro" depois do bot dar 2 descontos = intencao_compra com hesitação suave
+
+Categorias:
+- saudacao: PRIMEIRO contato. Cliente cumprimenta SEM histórico prévio na conversa.
+- duvida_produto: pergunta sobre produto, características, como funciona, qual diferença
+- pedir_preco: quer saber valor, quanto custa, formas de pagamento, link
+- objecao: hesitação real, "tá caro", "vou pensar", "depois eu vejo", "preciso conversar"
+- intencao_compra: quer fechar, "vou pegar", "pode mandar link", escolheu plano
+- comprou: pagou, mandou comprovante, "fechei", "paguei"
+- follow_up: cliente retomando conversa antiga ("eae", "oi", "voltei") JÁ COM HISTÓRICO
+- outros: continuação trivial, confirmação curta ("ok", "valeu", "blz", emoji)
 
 Responda SOMENTE com a categoria, sem explicação."""
 
@@ -344,15 +353,41 @@ async def load_history_node(state: SalesState) -> dict[str, Any]:
 # ────────────────────────────────────────────────────────────────────
 
 async def detect_intent_node(state: SalesState) -> dict[str, Any]:
-    """Classifica a intenção da última mensagem para roteamento condicional."""
+    """
+    Classifica intenção da última mensagem CONSIDERANDO contexto.
+
+    LLM recebe histórico recente + última msg pra decidir. Sem isso,
+    "eae" depois de 5 turnos vira "saudacao" falsamente → bot recomeça.
+    """
     user_msg = state.get("user_message") or ""
     if not user_msg.strip():
         return {"intent": "outros"}
 
-    llm = _make_llm(temperature=0.0, max_tokens=10)
+    # Pega últimas 8 msgs do histórico (excluindo a current — última no array)
+    msgs = state.get("messages") or []
+    # state["messages"] inclui a current user_msg como última. Pega anteriores.
+    prior = msgs[:-1][-8:] if len(msgs) > 1 else []
+
+    convo_lines: list[str] = []
+    for m in prior:
+        msg_type = getattr(m, "type", "")
+        role = "agent" if msg_type == "ai" else ("cliente" if msg_type == "human" else msg_type)
+        text = getattr(m, "content", "")
+        if isinstance(text, str) and text.strip():
+            convo_lines.append(f"{role}: {text[:220]}")
+    history_block = "\n".join(convo_lines) if convo_lines else "(sem histórico — primeiro contato)"
+
+    user_prompt = (
+        f"HISTÓRICO RECENTE DA CONVERSA:\n{history_block}\n\n"
+        f"ÚLTIMA MENSAGEM DO CLIENTE:\n{user_msg}\n\n"
+        f"Classifique a intenção CONSIDERANDO o contexto acima. "
+        f"Se houver histórico substantivo, NUNCA classifique como 'saudacao'."
+    )
+
+    llm = _make_llm(temperature=0.0, max_tokens=15)
     res = await llm.ainvoke([
         SystemMessage(content=INTENT_PROMPT),
-        HumanMessage(content=user_msg),
+        HumanMessage(content=user_prompt),
     ])
     raw = (res.content or "").strip().lower().split()[0] if res.content else "outros"
     raw = raw.strip(".,;:!?")
@@ -362,6 +397,13 @@ async def detect_intent_node(state: SalesState) -> dict[str, Any]:
         "objecao", "intencao_compra", "comprou", "follow_up", "outros",
     )
     intent: Intent = raw if raw in valid else "outros"
+
+    # Salvaguarda redundante: se classificou saudacao mas há histórico, força follow_up.
+    # Cobre caso edge onde LLM ignorou a regra crítica do prompt.
+    if intent == "saudacao" and len(prior) >= 2:
+        log.info("[intent] downgrade saudacao→follow_up: %d msgs no histórico", len(prior))
+        intent = "follow_up"
+
     return {"intent": intent}
 
 
