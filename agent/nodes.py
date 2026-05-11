@@ -880,17 +880,30 @@ async def send_node(state: SalesState) -> dict[str, Any]:
 
     from agent.tools import jitter_between_bubbles_ms, typing_delay_ms
 
+    evo = get_evolution()
+    instance = state["instance_name"]
+    phone = state["phone"]
+    message_id = state.get("message_id", "")
+
+    # Marca mensagem do cliente como LIDA antes de qualquer resposta
+    # → faz aparecer ✓✓ azul (2 tiques azuis) no WhatsApp do cliente
+    # → sinaliza que bot recebeu + leu, antes do "digitando..."
+    # → roda mesmo em caminhos silenciosos (chunks vazios, flow_dispatched)
+    if message_id:
+        remote_jid = f"{phone}@s.whatsapp.net"
+        try:
+            await evo.mark_read(instance, remote_jid, message_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.debug("[send] mark_read falhou (cosmético): %s", exc)
+
     if state.get("flow_dispatched"):
         return {}
 
     chunks = state.get("chunks") or []
     if not chunks:
         return {"sent": False, "sent_count": 0}
-
-    evo = get_evolution()
-    instance = state["instance_name"]
-    phone = state["phone"]
-    message_id = state.get("message_id", "")
 
     # Reação opcional (antes das bolhas, igual ao bot antigo)
     react_emoji = state.get("react_emoji")
