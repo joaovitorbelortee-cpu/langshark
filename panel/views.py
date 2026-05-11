@@ -67,6 +67,19 @@ async def login_submit(
     token = create_token(user)
     response = RedirectResponse("/admin", status_code=302)
     set_session_cookie(response, token)
+    # Emite CSRF cookie já no login pra fetches subsequentes funcionarem
+    # sem precisar GET /admin primeiro. Lido por JS (httponly=False).
+    import secrets
+    if not request.cookies.get("csrftoken"):
+        response.set_cookie(
+            key="csrftoken",
+            value=secrets.token_urlsafe(32),
+            max_age=24 * 3600,
+            httponly=False,
+            secure=True,
+            samesite="strict",
+            path="/",
+        )
     return response
 
 

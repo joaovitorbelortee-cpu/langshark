@@ -50,20 +50,38 @@ _DAY_KEYWORDS: dict[str, int | str] = {
     "final de semana": "weekend",
 }
 
-# Regex hora: "5h", "17h30", "às 5", "9 da manhã", "5 da tarde"
-_TIME_RE = re.compile(
-    r"""
-    \b
-    (?:às?|as)?\s*
-    (\d{1,2})                       # group 1: hora
-    (?::(\d{2}))?                   # group 2: minuto opcional
-    \s*(?:h\b|horas?\b|hs?\b|:00\b)?
-    (?:\s*(?:da|do|de)\s+
-        (manhã|manha|tarde|noite|madrugada))?  # group 3: período
-    \b
-    """,
-    re.VERBOSE | re.IGNORECASE,
-)
+# Padrões de horário em PT-BR. Ordem importa — tenta cada um até match.
+# Cada padrão exige um MARCADOR explícito além do número (h/horas/às/período)
+# pra não capturar "5 jogos" ou "tenho 25 anos" como horário.
+_TIME_PATTERNS = [
+    # 1) "17h30" / "17h" — h como separador/sufixo (mais comum)
+    re.compile(
+        r"\b(\d{1,2})h(\d{2})?\b(?:\s*(?:da|do|de)\s+(manhã|manha|tarde|noite|madrugada))?",
+        re.IGNORECASE,
+    ),
+    # 2) "17:30" / "17:00" — ":" separador clássico
+    re.compile(
+        r"\b(\d{1,2}):(\d{2})\b(?:\s*(?:da|do|de)\s+(manhã|manha|tarde|noite|madrugada))?",
+        re.IGNORECASE,
+    ),
+    # 3) "às 5", "as 17" + opcional h/min/período
+    re.compile(
+        r"\b(?:às?|as)\s+(\d{1,2})(?:[h:](\d{2}))?(?:\s*h)?\b"
+        r"(?:\s*(?:da|do|de)\s+(manhã|manha|tarde|noite|madrugada))?",
+        re.IGNORECASE,
+    ),
+    # 4) "17 horas" — sufixo horas/hora explícito
+    re.compile(
+        r"\b(\d{1,2})(?:[h:](\d{2}))?\s+horas?\b"
+        r"(?:\s*(?:da|do|de)\s+(manhã|manha|tarde|noite|madrugada))?",
+        re.IGNORECASE,
+    ),
+    # 5) "5 da tarde", "9 da manhã" — período obrigatório
+    re.compile(
+        r"\b(\d{1,2})(?:[h:](\d{2}))?\s+(?:da|do|de)\s+(manhã|manha|tarde|noite|madrugada)\b",
+        re.IGNORECASE,
+    ),
+]
 
 
 def _resolve_day_offset(text_low: str) -> int | None:
@@ -90,14 +108,29 @@ def _resolve_day_offset(text_low: str) -> int | None:
 
 def _resolve_hour(text: str) -> tuple[int | None, int]:
     """Extrai hora numérica + minuto. (None, 0) se não encontrou."""
-    # Tenta regex completo
-    m = _TIME_RE.search(text)
-    if m:
-        h_raw = int(m.group(1))
+    # Todos os patterns têm formato: (hora, min, período)
+    for pat in _TIME_PATTERNS:
+        m = pat.search(text)
+        if not m:
+            continue
+        h_str = m.group(1)
+        min_str = m.group(2) if m.lastindex and m.lastindex >= 2 else None
+        period = ""
+        try:
+            period = (m.group(3) or "").lower()
+        except IndexError:
+            period = ""
+        if h_str is None:
+            continue
+        try:
+            h_raw = int(h_str)
+        except ValueError:
+            continue
         if h_raw > 23:
-            return None, 0
-        minute = int(m.group(2) or 0)
-        period = (m.group(3) or "").lower()
+            continue
+        minute = int(min_str or 0)
+        if minute > 59:
+            continue
         if period in ("tarde", "noite") and h_raw < 12:
             h_raw += 12
         elif period == "madrugada" and h_raw >= 12:

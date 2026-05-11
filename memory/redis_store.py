@@ -209,6 +209,47 @@ class RedisStore:
                 return list(lst[start:])
             return list(lst[start:stop + 1])
 
+        if cmd == "LREM":
+            # LREM key count value — remove `count` ocorrências de `value`.
+            # count=0 → remove TODAS (semântica Redis).
+            entry = self._fallback.get(parts[1])
+            if not entry or not isinstance(entry[0], list):
+                return 0
+            try:
+                count = int(parts[2])
+            except (TypeError, ValueError):
+                count = 0
+            value = parts[3]
+            lst = entry[0]
+            removed = 0
+            if count == 0:
+                # Remove todos
+                new_lst = [x for x in lst if x != value]
+                removed = len(lst) - len(new_lst)
+                entry = (new_lst, entry[1])
+                self._fallback[parts[1]] = entry
+            elif count > 0:
+                # Remove os primeiros `count` (head → tail)
+                new_lst: list[Any] = []
+                for x in lst:
+                    if removed < count and x == value:
+                        removed += 1
+                        continue
+                    new_lst.append(x)
+                entry = (new_lst, entry[1])
+                self._fallback[parts[1]] = entry
+            else:
+                # count < 0 — remove últimos abs(count) (tail → head)
+                target = abs(count)
+                new_lst = list(lst)
+                for i in range(len(new_lst) - 1, -1, -1):
+                    if removed < target and new_lst[i] == value:
+                        new_lst.pop(i)
+                        removed += 1
+                entry = (new_lst, entry[1])
+                self._fallback[parts[1]] = entry
+            return removed
+
         return None
 
     # ────────────────────────────────────────────────────────────
@@ -395,9 +436,15 @@ class RedisStore:
         phone: str,
         status: dict[str, Any],
     ) -> None:
-        """Grava snapshot do lead pra painel. TTL 60d."""
+        """Grava snapshot do lead pra painel. TTL 60d. Dedup no índice."""
         key = self._lead_status_key(instance, phone)
         await self._cmd("SET", key, json.dumps(status), "EX", str(self._LEAD_STATUS_TTL))
+        # Remove dup do índice ANTES de adicionar — evita lista crescer sem limite.
+        # LREM 0 = remove todas ocorrências; tolerante a chave inexistente.
+        try:
+            await self._cmd("LREM", self._LEAD_STATUS_INDEX, "0", key)
+        except Exception:  # noqa: BLE001
+            pass
         # Index de keys (permite listar sem SCAN — Upstash REST não tem SCAN bom)
         await self._cmd("LPUSH", self._LEAD_STATUS_INDEX, key)
         await self._cmd("EXPIRE", self._LEAD_STATUS_INDEX, str(self._LEAD_STATUS_TTL))

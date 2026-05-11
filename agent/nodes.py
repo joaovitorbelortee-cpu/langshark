@@ -876,13 +876,14 @@ async def follow_up_strategist_node(state: SalesState) -> dict[str, Any]:
     instance = state.get("instance_name", "")
     phone = state.get("phone", "")
 
-    # Lead respondeu → zera contador (próximo follow-up começa do 0)
+    # Lê contador ANTES de classificar (hard cap 5+ depende disso).
+    # Reset acontece SÓ se intent sinalizar engagement real (não basta cliente
+    # mandar "ok"; precisa ser interação substantiva).
     try:
-        await redis.reset_followup_attempts(instance, phone)
+        attempts = await redis.get_followup_attempts(instance, phone)
     except Exception:  # noqa: BLE001
-        pass
+        attempts = 0
 
-    attempts = 0  # acabou de resetar
     try:
         decision = await classify_lead(
             messages=state.get("messages") or [],
@@ -899,6 +900,22 @@ async def follow_up_strategist_node(state: SalesState) -> dict[str, Any]:
             "abordagem": "valor",
             "killswitch_permanent": False,
         }
+
+    # Reset SÓ em engagement real: intent forte OU temperatura HOT/SCHEDULED.
+    # Cliente respondendo "ok"/"valeu" (intent=outros) NÃO zera o counter.
+    engagement_intents = {"intencao_compra", "duvida_produto", "pedir_preco", "objecao"}
+    engagement_temps = {"HOT", "SCHEDULED"}
+    if (
+        intent in engagement_intents
+        or decision.get("temperatura") in engagement_temps
+    ):
+        try:
+            await redis.reset_followup_attempts(instance, phone)
+            attempts = 0
+            log.info("[strategist] reset attempts %s/%s (engagement: intent=%s temp=%s)",
+                     instance, phone, intent, decision.get("temperatura"))
+        except Exception:  # noqa: BLE001
+            pass
 
     log.info(
         "[strategist] %s/%s temp=%s min=%d abord=%s razao=%s",

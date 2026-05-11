@@ -536,8 +536,12 @@ async def _queue_worker_loop() -> None:
                 except asyncio.TimeoutError:
                     pass  # delay completo, segue
 
-            await _process_queued(payload)
-            last_processed_phone = current_phone
+            try:
+                await _process_queued(payload)
+            finally:
+                # Atualiza last_processed_phone MESMO em exceção — evita
+                # delay duplicado se mesma rajada de erro continua.
+                last_processed_phone = current_phone or last_processed_phone
         except asyncio.CancelledError:
             log.info("[queue] worker cancelado")
             raise
@@ -586,10 +590,11 @@ async def _process_queued(payload: dict[str, Any]) -> None:
 
         # Se este turno foi follow-up disparado pelo bot, incrementa contador
         # (próxima decisão do strategist saberá quantas tentativas já houve).
+        attempts_after_incr = 0
         if kind == "followup":
             try:
-                n = await redis.increment_followup_attempts(instance, phone)
-                log.info("[strategist] %s/%s attempts=%d", instance, phone, n)
+                attempts_after_incr = await redis.increment_followup_attempts(instance, phone)
+                log.info("[strategist] %s/%s attempts=%d", instance, phone, attempts_after_incr)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -598,6 +603,36 @@ async def _process_queued(payload: dict[str, Any]) -> None:
         has_converted = final_state.get("has_converted", False)
         strategy = final_state.get("follow_up_strategy") or {}
         killswitch = bool(strategy.get("killswitch_permanent"))
+
+        # HARD GATE: 5+ tentativas sem resposta → mata follow-up permanentemente
+        # Strategist roda apenas em inbound (intent != follow_up), então em turnos
+        # de follow_up esta é a única defesa contra loop infinito de follow-ups.
+        FOLLOWUP_MAX_ATTEMPTS = 5
+        if kind == "followup" and attempts_after_incr >= FOLLOWUP_MAX_ATTEMPTS:
+            killswitch = True
+            schedule_min = None
+            log.info(
+                "[strategist] hard cap atingido %s/%s (attempts=%d) — marca LOST",
+                instance, phone, attempts_after_incr,
+            )
+            # Atualiza snapshot do lead pro painel ver killswitch
+            try:
+                from datetime import datetime as _dt, timezone as _tz
+                snapshot = await redis.get_lead_status(instance, phone) or {}
+                snapshot.update({
+                    "instance": instance,
+                    "phone": phone,
+                    "killswitch_permanent": True,
+                    "temperatura": "STOP",
+                    "razao": f"Lost — {FOLLOWUP_MAX_ATTEMPTS}+ tentativas sem resposta",
+                    "attempts_made": attempts_after_incr,
+                    "last_decision_at": _dt.now(_tz.utc).isoformat(),
+                    "next_followup_at": None,
+                    "agendar_minutos": 0,
+                })
+                await redis.set_lead_status(instance, phone, snapshot)
+            except Exception:  # noqa: BLE001
+                pass
 
         if schedule_min and not has_converted and not killswitch and qstash.enabled:
             r = await qstash.schedule_followup(
