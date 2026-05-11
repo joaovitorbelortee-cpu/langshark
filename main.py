@@ -104,6 +104,95 @@ def _calc_inter_lead_delay(qsize: int, hot: bool = False) -> float:
     return _gauss_delay(SCHED_DELAY_NORMAL)
 
 
+async def _bootstrap_evolution_webhooks() -> None:
+    """
+    Auto-config Evolution webhooks no startup. Idempotente — só atualiza se
+    URL diferente do expected ou webhook disabled. Failure soft (não crash
+    app se Evolution unreachable).
+
+    Resolve problema: Evolution criada antes do app ter PUBLIC_BASE_URL =
+    webhook URL stale → bot não recebe msgs. Em vez de pedir pro user rodar
+    curl manual, app fixa sozinho no startup.
+    """
+    base_url = (os.getenv("EVOLUTION_API_URL") or "").rstrip("/")
+    api_key = (os.getenv("EVOLUTION_API_KEY") or "").strip()
+    secret = (os.getenv("WEBHOOK_SECRET") or "").strip()
+    pub_raw = (os.getenv("PUBLIC_BASE_URL") or os.getenv("RAILWAY_PUBLIC_DOMAIN") or "").strip()
+
+    if not all([base_url, api_key, secret, pub_raw]):
+        log.warning(
+            "[bootstrap] evolution-webhook skip — missing env (api_url=%s api_key=%s secret=%s pub=%s)",
+            bool(base_url), bool(api_key), bool(secret), bool(pub_raw),
+        )
+        return
+
+    if not pub_raw.startswith("http"):
+        pub_raw = "https://" + pub_raw
+    expected = f"{pub_raw.rstrip('/')}/webhook/evolution"
+
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            r = await c.get(f"{base_url}/instance/fetchInstances", headers={"apikey": api_key})
+            r.raise_for_status()
+            instances = r.json() or []
+            if not isinstance(instances, list):
+                instances = []
+
+            for item in instances:
+                inst = item.get("instance") if isinstance(item, dict) and "instance" in item else item
+                if not isinstance(inst, dict):
+                    continue
+                name = inst.get("instanceName") or inst.get("name") or ""
+                if not name:
+                    continue
+
+                # Verifica webhook atual
+                needs_fix = True
+                try:
+                    wr = await c.get(f"{base_url}/webhook/find/{name}", headers={"apikey": api_key})
+                    if wr.is_success and wr.content:
+                        wd = wr.json() or {}
+                        actual_url = (wd.get("url") or "").rstrip("/")
+                        enabled = bool(wd.get("enabled"))
+                        if enabled and actual_url == expected.rstrip("/"):
+                            needs_fix = False
+                except httpx.HTTPError:
+                    pass  # assume needs_fix
+
+                if not needs_fix:
+                    log.info("[bootstrap] webhook %s OK (%s)", name, expected)
+                    continue
+
+                # Auto-fix
+                try:
+                    fr = await c.post(
+                        f"{base_url}/webhook/set/{name}",
+                        headers={"apikey": api_key, "Content-Type": "application/json"},
+                        json={
+                            "webhook": {
+                                "url": expected,
+                                "enabled": True,
+                                "webhookByEvents": False,
+                                "webhookBase64": True,
+                                "headers": {"apikey": secret, "Content-Type": "application/json"},
+                                "events": ["MESSAGES_UPSERT", "MESSAGES_UPDATE", "CONNECTION_UPDATE", "SEND_MESSAGE"],
+                            }
+                        },
+                    )
+                    if fr.is_success:
+                        log.info("[bootstrap] webhook %s FIXED → %s", name, expected)
+                    else:
+                        log.warning(
+                            "[bootstrap] webhook %s fix failed (%d): %s",
+                            name, fr.status_code, fr.text[:200],
+                        )
+                except httpx.HTTPError as e:
+                    log.warning("[bootstrap] webhook %s fix erro: %s", name, e)
+    except httpx.HTTPError as e:
+        log.warning("[bootstrap] Evolution unreachable (%s) — skip webhook bootstrap", e)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global _checkpointer_provider, _store_provider, _graph_app, _worker_task
@@ -135,6 +224,9 @@ async def lifespan(_app: FastAPI):
     _inbox_drainer_task = asyncio.create_task(_inbox_drainer_loop(), name="inbox-drainer")
     log.info("[startup] FIFO worker + inbox drainer iniciados (debounce=%.1fs)",
              INBOX_DEBOUNCE_S)
+
+    # Auto-fix Evolution webhooks (background — não bloqueia startup)
+    asyncio.create_task(_bootstrap_evolution_webhooks(), name="bootstrap-webhooks")
 
     try:
         yield
