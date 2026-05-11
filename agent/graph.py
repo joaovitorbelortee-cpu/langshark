@@ -44,6 +44,7 @@ from agent.nodes import (
     follow_up_node,
     greeting_node,
     load_history_node,
+    load_system_prompt_node,
     objection_node,
     persist_node,
     respond_node,
@@ -102,6 +103,7 @@ def build_graph(checkpointer: Any | None = None):
     g: StateGraph = StateGraph(SalesState)
 
     g.add_node("tenant_resolver", tenant_resolver_node)
+    g.add_node("load_system_prompt", load_system_prompt_node)
     g.add_node("load_history", load_history_node)
     g.add_node("summarize", summarize_node)
     g.add_node("vision", vision_node)
@@ -119,7 +121,8 @@ def build_graph(checkpointer: Any | None = None):
     g.add_node("send", send_node)
 
     g.add_edge(START, "tenant_resolver")
-    g.add_edge("tenant_resolver", "load_history")
+    g.add_edge("tenant_resolver", "load_system_prompt")
+    g.add_edge("load_system_prompt", "load_history")
     g.add_edge("load_history", "summarize")
     g.add_conditional_edges(
         "summarize",

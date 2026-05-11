@@ -60,6 +60,9 @@ class SalesState(TypedDict, total=False):
     react_emoji: str | None          # tag [REACT:X] detectada
     quote_previous: bool             # tag [QUOTE] detectada
 
+    # System prompt principal (carregado por load_system_prompt_node, herdado por TODOS especialistas)
+    system_prompt: str               # SALES_SYSTEM (Game Pass etc) — fonte única de verdade
+
     # Memória longa (preenchida por summarize_node quando histórico cresce)
     summary: str                     # resumo das mensagens antigas
 

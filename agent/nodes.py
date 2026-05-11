@@ -238,8 +238,19 @@ def _build_system_prompt(
     catalog_block: str,
     summary: str = "",
     flows_block: str = "",
+    base_prompt: str | None = None,
+    specialist_focus: str = "",
 ) -> str:
-    prompt = SALES_SYSTEM
+    """
+    Compõe system prompt = base (Game Pass etc) + foco do especialista + memória + RAG + fluxos.
+
+    base_prompt: SALES_SYSTEM dinâmico do state (padrão SALES_SYSTEM constante).
+    specialist_focus: bloco que especialista (greeting/objection/etc) acrescenta como FOCO,
+                      sem reescrever as regras gerais.
+    """
+    prompt = base_prompt if base_prompt else SALES_SYSTEM
+    if specialist_focus:
+        prompt += "\n\n<foco_deste_turno>\n" + specialist_focus + "\n</foco_deste_turno>"
     if summary:
         prompt += (
             "\n\n<resumo_conversa_anterior>\n"
@@ -353,6 +364,7 @@ async def respond_node(state: SalesState) -> dict[str, Any]:
         catalog_block,
         state.get("summary", ""),
         flows_prompt_block(project_id),
+        base_prompt=state.get("system_prompt"),
     )
 
     messages: list[Any] = [SystemMessage(content=system_prompt)]
@@ -385,29 +397,25 @@ async def respond_node(state: SalesState) -> dict[str, Any]:
 # Nó: close_sale (especialista em fechamento)
 # ────────────────────────────────────────────────────────────────────
 
-CLOSE_SYSTEM = """Você é um VENDEDOR FECHADOR. O lead demonstrou intenção real de compra.
-Sua tarefa: fechar AGORA com micro-compromisso.
+CLOSE_FOCUS = """MOMENTO DE FECHAMENTO. O lead demonstrou intenção real de compra.
+Foque em: confirmar produto+valor numa frase curta, pergunta direta de fechamento,
+mandar link de pagamento se ja sabe plataforma+plano. Se houver duvida residual,
+resolva em 1 linha e re-feche. RESPEITE todas as regras gerais ja definidas acima
+(precos exatos, plataforma-first, nao inventar, etc).
 
-REGRAS:
-- Confirme o produto e valor em 1 frase curta.
-- Pergunta de fechamento direta: "fechado?", "bora prosseguir?", "te mando o link?".
-- Se for [intencao_compra] forte: já mande método de pagamento (PIX/link).
-- Se houver dúvida residual: resolva em 1 linha e re-feche.
-- MÁXIMO 2 bolhas, ≤320 chars cada.
-
-Tags obrigatórias: encerre com [AGENDAR: 15] (lead quente, volta em 15 min se sumir).
-Se o cliente JÁ confirmou que pagou: encerre com [COMPROU] em vez de [AGENDAR]."""
+Tag: encerre com [AGENDAR: 15] (lead quente). Se cliente confirmou pagamento, use [COMPROU]."""
 
 
 async def close_sale_node(state: SalesState) -> dict[str, Any]:
-    """Variante de respond para o agente de fechamento."""
+    """Especialista em fechamento — herda SALES_SYSTEM via state['system_prompt']."""
     catalog_block = get_rag().format_context(state.get("catalog_hits", []) or [])
-    summary = state.get("summary", "")
-    system = CLOSE_SYSTEM
-    if summary:
-        system += f"\n\n<resumo>{summary}</resumo>"
-    if catalog_block:
-        system += "\n\n" + catalog_block
+    system = _build_system_prompt(
+        catalog_block,
+        state.get("summary", ""),
+        flows_prompt_block(state["project_id"]),
+        base_prompt=state.get("system_prompt"),
+        specialist_focus=CLOSE_FOCUS,
+    )
 
     messages: list[Any] = [SystemMessage(content=system)]
     messages.extend(state.get("messages", []))
@@ -518,71 +526,53 @@ async def vision_node(state: SalesState) -> dict[str, Any]:
 # Especialistas por intenção (cada um com prompt próprio)
 # ────────────────────────────────────────────────────────────────────
 
-GREETING_SYSTEM = """Você é um VENDEDOR HUMANO recebendo um cliente novo no WhatsApp.
-Seu único objetivo neste turno: ser caloroso, criar conexão e descobrir o nome dele.
+GREETING_FOCUS = """MOMENTO DE SAUDACAO. Cliente chegou agora.
+Foque em: ser caloroso, descobrir nome (se nao souber pelo historico), e DAR O PRIMEIRO PASSO
+que as regras gerais ja definidas acima exigem (ex: perguntar plataforma se for venda Game Pass).
+Se ja sabe o nome, nao pergunte de novo. RESPEITE 100% as regras gerais.
 
-REGRAS:
-- 1-2 bolhas curtas, ≤320 chars. Informal, brasileiro.
-- Não venda nada ainda. NÃO mencione preço, produto, condição.
-- Pergunte o nome de forma natural: "posso te chamar como?", "qual seu nome?".
-- Se ele já disse o nome em alguma mensagem anterior, USE o nome e pula a pergunta — passa
-  pra qualificação leve ("e me conta, o que te trouxe aqui?").
-- Emojis com moderação. Nunca pareça SAC.
-
-Tags obrigatórias: termine com [AGENDAR: 20] (lead curioso, volta em 20 min se sumir)."""
+Tag: [AGENDAR: 20]."""
 
 
-OBJECTION_SYSTEM = """Você é um VENDEDOR especialista em QUEBRA DE OBJEÇÃO. O lead hesitou
-("tá caro", "vou pensar", "depois eu vejo", "não sei se vale a pena").
+OBJECTION_FOCUS = """MOMENTO DE QUEBRA DE OBJECAO. Lead hesitou (caro/vou pensar/nao confio).
+Roteiro:
+1. VALIDA o sentimento ("entendo", "faz sentido")
+2. REFRAME usando as ESCADAS DE PRECO/CONTRA-ARGUMENTOS ja definidas nas regras gerais acima
+3. MICRO-COMPROMISSO sem forcar fechamento
 
-ROTEIRO (Cialdini + reframing):
-1. VALIDA primeiro: "entendo perfeitamente", "faz sentido", "boa pergunta" — sem ironia.
-2. REFRAME o valor: ancoragem (compare com algo maior), prova social ("tive um cliente que..."),
-   ou ROI ("em 1 mês isso já se paga porque...").
-3. MICRO-COMPROMISSO: convide pra um próximo passo pequeno ("posso te mostrar um caso?",
-   "quer ver como funciona em 2 min?"). Não force fechamento.
+NAO invente novos argumentos. Use SO o que esta nas regras gerais.
 
-REGRAS:
-- Máximo 2 bolhas, ≤320 chars cada.
-- NUNCA prometa o que não pode cumprir.
-- Se a objeção for preço genuíno: tenha empatia e ofereça alternativa real (plano menor,
-  parcelado) — só se existir.
-
-Tags: termine com [AGENDAR: 60] (deu espaço de 1h, ele precisa respirar)."""
+Tag: [AGENDAR: 60]."""
 
 
-FOLLOW_UP_SYSTEM = """Você é um VENDEDOR retomando uma conversa antiga. O lead respondeu
-agora depois de um tempo, ou o sistema agendou um follow-up que disparou.
+FOLLOW_UP_FOCUS = """MOMENTO DE FOLLOW-UP. Conversa antiga retomando.
+Foque em: usar contexto do historico (Efeito Zeigarnik — pergunta aberta que ficou).
+Nao recomece do zero. Nao re-pergunte o que ja foi respondido.
+Se conversa morreu ha muito tempo, abra com VALOR (reciprocidade) seguindo as regras gerais.
 
-REGRAS:
-- USE o histórico: cite algo da conversa anterior para mostrar continuidade
-  ("E aí, conseguiu pensar naquilo que a gente conversou sobre X?").
-- Não comece do zero. Não pergunte coisas que ele já respondeu.
-- Aplique Efeito Zeigarnik: retome a pergunta aberta que ficou pendente.
-- Se a conversa morreu há muito tempo (sem contexto recente), abra com algo de VALOR
-  (dica, novidade, oferta nova) — reciprocidade.
-- 1-2 bolhas curtas. Informal.
-
-Tags: leia a temperatura.
-- Se ele engajou agora: [AGENDAR: 15].
-- Se respondeu vago: [AGENDAR: 180].
-- Se você está iniciando follow-up sem resposta dele: [AGENDAR: 1440] (24h)."""
+Tag: leia temperatura — engajado=[AGENDAR: 15], vago=[AGENDAR: 180], sumiu=[AGENDAR: 1440]."""
 
 
 async def _run_specialist(
     state: SalesState,
-    system_prompt: str,
+    specialist_focus: str,
     temperature: float = 0.7,
     max_tokens: int = 400,
 ) -> dict[str, Any]:
-    """Helper compartilhado pelos especialistas — mesma lógica de tags/chunks."""
+    """
+    Helper compartilhado pelos especialistas.
+
+    HERANCA: monta system_prompt = SALES_SYSTEM (base do state) + foco do especialista.
+    Especialista NUNCA reescreve as regras gerais — só adiciona foco do turno.
+    """
     catalog_block = get_rag().format_context(state.get("catalog_hits", []) or [])
-    summary = state.get("summary", "")
-    system = system_prompt
-    if summary:
-        system += f"\n\n<resumo>{summary}</resumo>"
-    if catalog_block:
-        system += "\n\n" + catalog_block
+    system = _build_system_prompt(
+        catalog_block,
+        state.get("summary", ""),
+        flows_prompt_block(state["project_id"]),
+        base_prompt=state.get("system_prompt"),
+        specialist_focus=specialist_focus,
+    )
 
     messages: list[Any] = [SystemMessage(content=system)]
     messages.extend(state.get("messages", []))
@@ -608,18 +598,37 @@ async def _run_specialist(
 
 
 async def greeting_node(state: SalesState) -> dict[str, Any]:
-    """Saudação calorosa + descoberta de nome."""
-    return await _run_specialist(state, GREETING_SYSTEM, temperature=0.8, max_tokens=200)
+    """Saudação calorosa + descoberta de nome (herda SALES_SYSTEM)."""
+    return await _run_specialist(state, GREETING_FOCUS, temperature=0.8, max_tokens=200)
 
 
 async def objection_node(state: SalesState) -> dict[str, Any]:
-    """Quebra de objeção com Cialdini."""
-    return await _run_specialist(state, OBJECTION_SYSTEM, temperature=0.6, max_tokens=350)
+    """Quebra de objeção com Cialdini (herda SALES_SYSTEM)."""
+    return await _run_specialist(state, OBJECTION_FOCUS, temperature=0.6, max_tokens=350)
 
 
 async def follow_up_node(state: SalesState) -> dict[str, Any]:
-    """Retomada de conversa antiga."""
-    return await _run_specialist(state, FOLLOW_UP_SYSTEM, temperature=0.7, max_tokens=300)
+    """Retomada de conversa antiga (herda SALES_SYSTEM)."""
+    return await _run_specialist(state, FOLLOW_UP_FOCUS, temperature=0.7, max_tokens=300)
+
+
+# ────────────────────────────────────────────────────────────────────
+# Nó: load_system_prompt (carrega SALES_SYSTEM no state, herdado por todos)
+# ────────────────────────────────────────────────────────────────────
+
+async def load_system_prompt_node(state: SalesState) -> dict[str, Any]:
+    """
+    Carrega o SALES_SYSTEM principal e injeta em state['system_prompt'].
+    Todos os nós (respond, close_sale, greeting, objection, follow_up) leem dali
+    como base — única fonte de verdade do prompt do bot.
+
+    Pluggable: futuro, busca system_prompt do Supabase project_config table
+    (multi-tenant: cada projeto tem seu prompt próprio). Por enquanto usa SALES_SYSTEM
+    constante.
+    """
+    # TODO multi-tenant: SELECT system_prompt FROM project_config WHERE project_id = state.project_id
+    # Por agora: hardcoded SALES_SYSTEM. Plugar Supabase depois sem mudar grafo.
+    return {"system_prompt": SALES_SYSTEM}
 
 
 # ────────────────────────────────────────────────────────────────────
