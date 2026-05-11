@@ -160,11 +160,66 @@
                 <template x-if="step.type !== 'text'">
                   <div>
                     <div class="builder-field" style="margin-top: 12px;">
-                      <label class="builder-label">URL DA MÍDIA <span class="builder-required">*</span></label>
-                      <input class="input" type="url"
-                             x-model="step.url"
-                             placeholder="https://..." />
-                      <small class="builder-hint">Link público da imagem/vídeo/áudio/documento.</small>
+                      <label class="builder-label">ARQUIVO <span class="builder-required">*</span></label>
+
+                      <!-- Pré-visualização quando já tem URL -->
+                      <template x-if="step.url">
+                        <div class="media-preview">
+                          <template x-if="step.type === 'image'">
+                            <img :src="step.url" :alt="step.caption || 'preview'" />
+                          </template>
+                          <template x-if="step.type === 'video'">
+                            <video :src="step.url" controls preload="metadata"></video>
+                          </template>
+                          <template x-if="step.type === 'audio'">
+                            <audio :src="step.url" controls></audio>
+                          </template>
+                          <template x-if="step.type === 'document'">
+                            <div class="media-doc">
+                              <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                                <polyline points="14 2 14 8 20 8"/>
+                              </svg>
+                              <span x-text="step.fileName || (step.url.split('/').pop() || 'arquivo')"></span>
+                            </div>
+                          </template>
+                          <button class="media-remove" type="button" @click="step.url = ''; step.uploadProgress = 0;" aria-label="Remover arquivo">×</button>
+                        </div>
+                      </template>
+
+                      <!-- Picker quando não tem URL -->
+                      <template x-if="!step.url">
+                        <label class="media-picker" :class="step.uploading ? 'media-picker-uploading' : ''">
+                          <input type="file"
+                                 :accept="acceptAttr(step.type)"
+                                 @change="uploadMedia(step, $event)"
+                                 style="display: none;" />
+                          <template x-if="!step.uploading">
+                            <div class="media-picker-content">
+                              <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.5">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                <polyline points="17 8 12 3 7 8"/>
+                                <line x1="12" y1="3" x2="12" y2="15"/>
+                              </svg>
+                              <div>
+                                <strong>Clique pra escolher arquivo</strong><br/>
+                                <small x-text="acceptHint(step.type)"></small>
+                              </div>
+                            </div>
+                          </template>
+                          <template x-if="step.uploading">
+                            <div class="media-picker-content">
+                              <div class="media-spinner"></div>
+                              <div>
+                                <strong>Enviando...</strong><br/>
+                                <small x-text="(step.uploadProgress || 0) + '%'"></small>
+                              </div>
+                            </div>
+                          </template>
+                        </label>
+                      </template>
+
+                      <small class="builder-hint">Máx 25 MB. Bot envia esse arquivo ao disparar o fluxo.</small>
                     </div>
                     <div class="builder-field" style="margin-top: 12px;" x-show="step.type !== 'audio'">
                       <label class="builder-label">LEGENDA (opcional)</label>
@@ -229,11 +284,83 @@ function flowsPage() {
     },
 
     newStep() {
-      return { type: 'text', content: '', url: '', caption: '', fileName: '' };
+      return { type: 'text', content: '', url: '', caption: '', fileName: '', uploading: false, uploadProgress: 0 };
     },
 
     addStep() {
       this.form.steps.push(this.newStep());
+    },
+
+    acceptAttr(type) {
+      return ({
+        image: 'image/*',
+        video: 'video/*',
+        audio: 'audio/*',
+        document: '.pdf,.doc,.docx,.xls,.xlsx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      })[type] || '*/*';
+    },
+
+    acceptHint(type) {
+      return ({
+        image: 'JPG, PNG, GIF, WebP',
+        video: 'MP4, MOV, WebM',
+        audio: 'MP3, OGG, WAV, M4A',
+        document: 'PDF, Word, Excel',
+      })[type] || '';
+    },
+
+    async uploadMedia(step, event) {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      if (file.size > 25 * 1024 * 1024) {
+        showToast('Arquivo > 25 MB. Reduza o tamanho.', 'error');
+        event.target.value = '';
+        return;
+      }
+      step.uploading = true;
+      step.uploadProgress = 0;
+      try {
+        const fd = new FormData();
+        fd.append('file', file);
+        const xhr = new XMLHttpRequest();
+        const promise = new Promise((resolve, reject) => {
+          xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable) {
+              step.uploadProgress = Math.round((e.loaded / e.total) * 100);
+            }
+          };
+          xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              try { resolve(JSON.parse(xhr.responseText)); }
+              catch { reject(new Error('resposta inválida')); }
+            } else {
+              try {
+                const err = JSON.parse(xhr.responseText);
+                reject(new Error(err.detail || `HTTP ${xhr.status}`));
+              } catch {
+                reject(new Error(`HTTP ${xhr.status}`));
+              }
+            }
+          };
+          xhr.onerror = () => reject(new Error('falha de rede'));
+        });
+        xhr.open('POST', '/api/admin/media/upload');
+        // CSRF header
+        const csrf = (document.cookie.match(/csrftoken=([^;]+)/) || [])[1];
+        if (csrf) xhr.setRequestHeader('X-CSRF-Token', decodeURIComponent(csrf));
+        xhr.send(fd);
+        const data = await promise;
+        step.url = data.url;
+        if (step.type === 'document' && !step.fileName) {
+          step.fileName = data.original_name || data.filename;
+        }
+        showToast('Arquivo enviado', 'success');
+      } catch (e) {
+        showToast('Upload falhou: ' + e.message, 'error');
+      } finally {
+        step.uploading = false;
+        event.target.value = '';
+      }
     },
 
     removeStep(idx) {

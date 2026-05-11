@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Response
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Response, UploadFile
 
 from agent.tools import EvolutionClient
 from panel.auth import (
@@ -591,6 +591,94 @@ async def delete_product(
     ok = await _products_repo.delete(product_id)
     await _audit(user, "product.delete", "product", product_id)
     return {"ok": ok}
+
+
+# ────────────────────────────────────────────────────────────────────
+# Media upload — bucket Supabase Storage `flow-media` (público).
+# Usado pelo flow builder pra anexar imagem/video/audio/documento.
+# ────────────────────────────────────────────────────────────────────
+
+MEDIA_MAX_SIZE = 25 * 1024 * 1024  # 25 MB
+MEDIA_BUCKET = "flow-media"
+MEDIA_ALLOWED_MIME_PREFIXES = ("image/", "video/", "audio/", "application/")
+
+
+@admin_router.post("/media/upload")
+async def upload_media(
+    user: Annotated[dict[str, Any], Depends(require_admin)],
+    file: UploadFile = File(...),
+) -> dict[str, Any]:
+    """
+    Faz upload de mídia pro bucket Supabase `flow-media` (público).
+    Retorna URL pública pra usar em step.url de fluxos.
+    """
+    if not file or not file.filename:
+        raise HTTPException(status_code=400, detail="Nenhum arquivo enviado")
+
+    mime = (file.content_type or "application/octet-stream").lower()
+    if not any(mime.startswith(p) for p in MEDIA_ALLOWED_MIME_PREFIXES):
+        raise HTTPException(status_code=415, detail=f"MIME não permitido: {mime}")
+
+    content = await file.read()
+    if len(content) == 0:
+        raise HTTPException(status_code=400, detail="Arquivo vazio")
+    if len(content) > MEDIA_MAX_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Arquivo > {MEDIA_MAX_SIZE // (1024*1024)} MB",
+        )
+
+    # Nome único — uuid + extensão original
+    import mimetypes
+    import uuid as _uuid
+    ext = ""
+    if "." in file.filename:
+        ext = "." + file.filename.rsplit(".", 1)[1].lower()[:6]
+    elif mime != "application/octet-stream":
+        ext_guess = mimetypes.guess_extension(mime) or ""
+        ext = ext_guess
+    safe_name = f"{_uuid.uuid4().hex}{ext}"
+
+    # Upload pro Supabase Storage via REST
+    from panel.repos import _supabase_creds
+    url, key = _supabase_creds()
+    if not url or not key:
+        raise HTTPException(status_code=503, detail="Supabase não configurado")
+
+    import httpx
+    upload_url = f"{url}/storage/v1/object/{MEDIA_BUCKET}/{safe_name}"
+    public_url = f"{url}/storage/v1/object/public/{MEDIA_BUCKET}/{safe_name}"
+
+    async with httpx.AsyncClient(timeout=60.0) as c:
+        r = await c.post(
+            upload_url,
+            headers={
+                "apikey": key,
+                "Authorization": f"Bearer {key}",
+                "Content-Type": mime,
+                "x-upsert": "true",
+            },
+            content=content,
+        )
+        if not r.is_success:
+            raise HTTPException(
+                status_code=r.status_code,
+                detail=f"Upload falhou: {r.text[:300]}",
+            )
+
+    await _audit(
+        user, "media.upload", "storage_object", safe_name,
+        bucket=MEDIA_BUCKET, original_name=file.filename, size=len(content), mime=mime,
+    )
+
+    return {
+        "ok": True,
+        "url": public_url,
+        "filename": safe_name,
+        "original_name": file.filename,
+        "size": len(content),
+        "mime": mime,
+    }
 
 
 # ────────────────────────────────────────────────────────────────────

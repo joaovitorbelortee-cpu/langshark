@@ -476,6 +476,94 @@ input, textarea { font-family: inherit; font-size: inherit; }
 /* ────── Alpine x-cloak: esconde elementos x-show até Alpine processar ────── */
 [x-cloak] { display: none !important; }
 
+/* ────── Flow Builder media picker ────── */
+.media-picker {
+  display: block;
+  cursor: pointer;
+  border: 2px dashed var(--border-active);
+  border-radius: 10px;
+  background: rgba(34, 211, 238, 0.04);
+  transition: border-color var(--dur-fast), background var(--dur-fast);
+  padding: 24px;
+}
+.media-picker:hover {
+  border-color: var(--accent);
+  background: rgba(34, 211, 238, 0.10);
+}
+.media-picker.media-picker-uploading {
+  border-color: var(--warning);
+  background: rgba(245, 158, 11, 0.08);
+  cursor: wait;
+}
+.media-picker-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+.media-picker-content svg {
+  color: var(--accent);
+}
+.media-picker-content strong {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.media-picker-content small {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.media-spinner {
+  width: 32px; height: 32px;
+  border: 3px solid var(--border-subtle);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.media-preview {
+  position: relative;
+  border: 1px solid var(--border-active);
+  border-radius: 10px;
+  background: var(--bg-input);
+  padding: 12px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+.media-preview img,
+.media-preview video {
+  max-width: 100%;
+  max-height: 200px;
+  border-radius: 6px;
+}
+.media-preview audio { width: 100%; }
+.media-doc {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--text-primary);
+  padding: 8px 4px;
+}
+.media-doc svg { color: var(--accent); }
+.media-remove {
+  position: absolute;
+  top: 6px; right: 6px;
+  width: 24px; height: 24px;
+  border-radius: 50%;
+  background: var(--danger);
+  color: white;
+  font-size: 16px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+.media-remove:hover { transform: scale(1.1); }
+
 .model-card {
   position: relative;
 }
