@@ -87,3 +87,8 @@ class SalesState(TypedDict):
 
     # Lead Memory (preenchido por lead_memory_node) — anti-amnésia
     lead_facts: NotRequired[dict[str, Any]]           # {plataforma, nome, plano_interesse, estagio, ...}
+
+    # Supervisor (preenchido por supervisor_node) — validação anti-burrice
+    supervisor_review: NotRequired[dict[str, Any]]    # {approved, reason, feedback, severity}
+    supervisor_attempts: NotRequired[int]             # nº de retries já tentados
+    supervisor_feedback: NotRequired[str]             # feedback do supervisor pra retry do especialista

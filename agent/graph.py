@@ -53,6 +53,7 @@ from agent.nodes import (
     retrieve_catalog_node,
     send_node,
     summarize_node,
+    supervisor_node,
     tenant_resolver_node,
     vision_node,
 )
@@ -102,12 +103,24 @@ def _last_ai_has_tool_calls(state: SalesState) -> bool:
 
 
 def _route_after_reply(state: SalesState) -> str:
-    """Depois de respond/close/specialists: tools > flow > persist."""
+    """Depois de respond/close/specialists: tools > flow > supervisor."""
     if os.getenv("ENABLE_TOOL_CALLS") and _last_ai_has_tool_calls(state):
         return "tools_path"
     if state.get("flow_name"):
         return "flow_path"
-    return "persist_path"
+    return "supervisor_path"
+
+
+def _route_after_supervisor(state: SalesState) -> str:
+    """
+    Após supervisor avaliar:
+      - rejected + tem retry → volta pro respond_node com feedback
+      - approved OU sem retries → strategist (segue normal)
+    """
+    review = state.get("supervisor_review") or {}
+    if not review.get("approved") and state.get("supervisor_feedback"):
+        return "retry_path"
+    return "strategist_path"
 
 
 def build_graph(checkpointer: Any | None = None):
@@ -130,6 +143,7 @@ def build_graph(checkpointer: Any | None = None):
     g.add_node("follow_up", follow_up_node)
     g.add_node("flow_executor", flow_executor_node)
     g.add_node("tools", ToolNode(EVOLUTION_TOOLS))
+    g.add_node("supervisor", supervisor_node)
     g.add_node("strategist", follow_up_strategist_node)
     g.add_node("persist", persist_node)
     g.add_node("send", send_node)
@@ -163,8 +177,8 @@ def build_graph(checkpointer: Any | None = None):
     g.add_edge("retrieve_for_close", "close_sale")
     g.add_edge("retrieve_for_respond", "respond")
 
-    # Após qualquer nó que produz reply, decide entre tools / fluxo / strategist.
-    # Strategist sempre roda ANTES de persist (decide próximo follow-up).
+    # Após qualquer nó que produz reply: tools/flow/supervisor.
+    # Supervisor valida ANTES de strategist+persist (anti-burrice).
     for reply_node in ("close_sale", "respond", "greeting", "objection", "follow_up"):
         g.add_conditional_edges(
             reply_node,
@@ -172,12 +186,23 @@ def build_graph(checkpointer: Any | None = None):
             {
                 "tools_path": "tools",
                 "flow_path": "flow_executor",
-                "persist_path": "strategist",
+                "supervisor_path": "supervisor",
             },
         )
 
-    g.add_edge("tools", "strategist")
-    g.add_edge("flow_executor", "strategist")
+    g.add_edge("tools", "supervisor")
+    g.add_edge("flow_executor", "supervisor")
+
+    # Supervisor: aprovou → strategist; rejeitou → respond (retry com feedback)
+    g.add_conditional_edges(
+        "supervisor",
+        _route_after_supervisor,
+        {
+            "strategist_path": "strategist",
+            "retry_path": "respond",
+        },
+    )
+
     g.add_edge("strategist", "persist")
     g.add_edge("persist", "send")
     g.add_edge("send", END)

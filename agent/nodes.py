@@ -285,14 +285,17 @@ def _build_system_prompt(
     base_prompt: str | None = None,
     specialist_focus: str = "",
     lead_facts: dict[str, Any] | None = None,
+    supervisor_feedback: str | None = None,
 ) -> str:
     """
     Compõe system prompt = base + foco + lead_facts (CRÍTICO anti-amnésia) +
-    summary + RAG + flows.
+    summary + RAG + flows + supervisor_feedback (se retry).
 
     lead_facts: dict estruturado {plataforma, nome, plano_interesse, objecoes, estagio, ...}
                 Renderizado como bloco <lead_conhecido> que instrui bot a NÃO
                 reperguntar dados conhecidos.
+    supervisor_feedback: instrução de correção do supervisor quando especialista
+                        precisa refazer resposta rejeitada.
     """
     prompt = base_prompt if base_prompt else SALES_SYSTEM
 
@@ -305,6 +308,17 @@ def _build_system_prompt(
 
     if specialist_focus:
         prompt += "\n\n<foco_deste_turno>\n" + specialist_focus + "\n</foco_deste_turno>"
+
+    # Supervisor feedback vai PRÓXIMO do final pra ter mais peso no LLM
+    if supervisor_feedback:
+        prompt += (
+            "\n\n<supervisor_feedback>\n"
+            "ATENÇÃO: sua resposta anterior foi REJEITADA pelo supervisor.\n"
+            f"Motivo/correção: {supervisor_feedback}\n"
+            "REESCREVA seguindo essa instrução. NÃO repita o erro.\n"
+            "</supervisor_feedback>"
+        )
+
     if summary:
         prompt += (
             "\n\n<resumo_conversa_anterior>\n"
@@ -510,6 +524,7 @@ async def respond_node(state: SalesState) -> dict[str, Any]:
         flows_prompt_block(project_id),
         base_prompt=state.get("system_prompt"),
         lead_facts=state.get("lead_facts"),
+        supervisor_feedback=state.get("supervisor_feedback"),
     )
 
     messages: list[Any] = [SystemMessage(content=system_prompt)]
@@ -576,6 +591,7 @@ async def close_sale_node(state: SalesState) -> dict[str, Any]:
         base_prompt=state.get("system_prompt"),
         specialist_focus=CLOSE_FOCUS,
         lead_facts=state.get("lead_facts"),
+        supervisor_feedback=state.get("supervisor_feedback"),
     )
 
     messages: list[Any] = [SystemMessage(content=system)]
@@ -772,6 +788,7 @@ async def _run_specialist(
         base_prompt=state.get("system_prompt"),
         specialist_focus=specialist_focus,
         lead_facts=state.get("lead_facts"),
+        supervisor_feedback=state.get("supervisor_feedback"),
     )
 
     messages: list[Any] = [SystemMessage(content=system)]
@@ -1014,6 +1031,62 @@ async def flow_executor_node(state: SalesState) -> dict[str, Any]:
 # ────────────────────────────────────────────────────────────────────
 # Nó: tenant_resolver (project_id via Supabase instance_projects)
 # ────────────────────────────────────────────────────────────────────
+
+async def supervisor_node(state: SalesState) -> dict[str, Any]:
+    """
+    Valida a resposta proposta pelo especialista ANTES de persist+send.
+
+    Roda APÓS especialistas (greeting/respond/close/etc) e ANTES de strategist.
+    Se rejected E attempts < max, NÃO bloqueia mas marca pra retry no especialista.
+
+    NOTA: retry real é feito via re-routing condicional no graph. Aqui só decide.
+    """
+    if os.getenv("SUPERVISOR_DISABLED") == "1":
+        return {}
+    # Skip se não há reply (intent=comprou path, follow-up sem msg, etc)
+    proposed = state.get("reply") or ""
+    if not proposed.strip():
+        return {}
+
+    from agent.supervisor import review_reply, SUPERVISOR_MAX_RETRIES
+
+    attempts = state.get("supervisor_attempts", 0) or 0
+
+    try:
+        review = await review_reply(
+            proposed_reply=proposed,
+            messages=state.get("messages") or [],
+            lead_facts=state.get("lead_facts"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[supervisor] erro: %s — default approve", exc)
+        review = {"approved": True, "reason": "supervisor error", "feedback": None, "severity": "ok"}
+
+    log.info(
+        "[supervisor] %s/%s approved=%s severity=%s reason=%s",
+        state.get("instance_name", "?"), state.get("phone", "?"),
+        review["approved"], review["severity"], review["reason"],
+    )
+
+    patch: dict[str, Any] = {"supervisor_review": review}
+
+    # Se rejeitado E ainda tem retry disponível, marca pra refazer
+    if not review["approved"] and attempts < SUPERVISOR_MAX_RETRIES:
+        patch["supervisor_feedback"] = review.get("feedback") or review.get("reason") or ""
+        patch["supervisor_attempts"] = attempts + 1
+        # Limpa chunks/reply pra forçar especialista regerar
+        patch["reply"] = ""
+        patch["chunks"] = []
+    elif not review["approved"]:
+        # Esgotou retries — envia mesmo com warning no log
+        log.warning(
+            "[supervisor] %s/%s max retries (%d) atingido, envia mesmo. reason=%s",
+            state.get("instance_name", "?"), state.get("phone", "?"),
+            SUPERVISOR_MAX_RETRIES, review["reason"],
+        )
+
+    return patch
+
 
 async def follow_up_strategist_node(state: SalesState) -> dict[str, Any]:
     """

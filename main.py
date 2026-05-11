@@ -67,9 +67,9 @@ INTER_LEAD_DELAY_ENABLED = os.getenv("INTER_LEAD_DELAY_ENABLED", "1") == "1"
 INTER_LEAD_LOW_THRESHOLD = int(os.getenv("INTER_LEAD_LOW_THRESHOLD", "2"))
 INTER_LEAD_HIGH_THRESHOLD = int(os.getenv("INTER_LEAD_HIGH_THRESHOLD", "5"))
 # Ranges reduzidos drasticamente — antes 1-5min, agora 5-30s default
-INTER_LEAD_LOW_RANGE_S = (5, 15)       # 5-15s carga baixa
-INTER_LEAD_NORMAL_RANGE_S = (10, 30)   # 10-30s carga média
-INTER_LEAD_HIGH_RANGE_S = (15, 45)     # 15-45s carga alta
+INTER_LEAD_LOW_RANGE_S = (60, 120)     # 1-2 min carga baixa
+INTER_LEAD_NORMAL_RANGE_S = (60, 180)  # 1-3 min carga média
+INTER_LEAD_HIGH_RANGE_S = (90, 240)    # 1.5-4 min carga alta
 
 
 def _calc_inter_lead_delay(qsize: int) -> float:

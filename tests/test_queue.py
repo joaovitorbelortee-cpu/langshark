@@ -140,36 +140,36 @@ async def test_dequeue_malformed_returns_none():
 # ────────────────────────────────────────────────────────────────────
 
 def test_inter_lead_delay_low_load(monkeypatch):
-    """Queue pequena → delay 5-15s (volume alto não pode esperar)."""
+    """Queue pequena → 1-2 min."""
     monkeypatch.setenv("WEBHOOK_SECRET", "x" * 32)
     from main import _calc_inter_lead_delay
     for _ in range(20):
         d = _calc_inter_lead_delay(qsize=0)
-        assert 5 <= d <= 15, f"qsize=0 esperado 5-15, got {d}"
+        assert 60 <= d <= 120, f"qsize=0 esperado 60-120, got {d}"
         d = _calc_inter_lead_delay(qsize=2)
-        assert 5 <= d <= 15, f"qsize=2 esperado 5-15, got {d}"
+        assert 60 <= d <= 120, f"qsize=2 esperado 60-120, got {d}"
 
 
 def test_inter_lead_delay_normal_load(monkeypatch):
-    """Queue média → delay 10-30s."""
+    """Queue média → 1-3 min."""
     monkeypatch.setenv("WEBHOOK_SECRET", "x" * 32)
     from main import _calc_inter_lead_delay
     for _ in range(20):
         d = _calc_inter_lead_delay(qsize=3)
-        assert 10 <= d <= 30, f"qsize=3 esperado 10-30, got {d}"
+        assert 60 <= d <= 180, f"qsize=3 esperado 60-180, got {d}"
         d = _calc_inter_lead_delay(qsize=5)
-        assert 10 <= d <= 30, f"qsize=5 esperado 10-30, got {d}"
+        assert 60 <= d <= 180, f"qsize=5 esperado 60-180, got {d}"
 
 
 def test_inter_lead_delay_high_load(monkeypatch):
-    """Queue grande → delay 15-45s."""
+    """Queue grande → 1.5-4 min."""
     monkeypatch.setenv("WEBHOOK_SECRET", "x" * 32)
     from main import _calc_inter_lead_delay
     for _ in range(20):
         d = _calc_inter_lead_delay(qsize=6)
-        assert 15 <= d <= 45, f"qsize=6 esperado 15-45, got {d}"
+        assert 90 <= d <= 240, f"qsize=6 esperado 90-240, got {d}"
         d = _calc_inter_lead_delay(qsize=20)
-        assert 15 <= d <= 45, f"qsize=20 esperado 15-45, got {d}"
+        assert 90 <= d <= 240, f"qsize=20 esperado 90-240, got {d}"
 
 
 def test_inter_lead_delay_randomized(monkeypatch):
