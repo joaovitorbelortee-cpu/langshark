@@ -63,6 +63,14 @@ def _route_after_intent(state: SalesState) -> str:
     if intent == "comprou":
         return "persist"
     if intent == "saudacao":
+        # Conta msgs do cliente no histórico — se já teve conversa, NÃO é saudação inicial.
+        # "eae" depois de 5 turnos = retomada, não primeiro contato.
+        # Roteia pra respond_path: LLM vê histórico completo + responde no contexto.
+        msgs = state.get("messages") or []
+        user_msgs = sum(1 for m in msgs if getattr(m, "type", "") == "human")
+        # Inclui a msg atual (já adicionada por load_history_node)
+        if user_msgs > 1:
+            return "respond_path"
         return "greeting"
     if intent == "objecao":
         return "objection"

@@ -561,10 +561,17 @@ async def vision_node(state: SalesState) -> dict[str, Any]:
 # Especialistas por intenção (cada um com prompt próprio)
 # ────────────────────────────────────────────────────────────────────
 
-GREETING_FOCUS = """MOMENTO DE SAUDACAO. Cliente chegou agora.
-Foque em: ser caloroso, descobrir nome (se nao souber pelo historico), e DAR O PRIMEIRO PASSO
-que as regras gerais ja definidas acima exigem (ex: perguntar plataforma se for venda Game Pass).
-Se ja sabe o nome, nao pergunte de novo. RESPEITE 100% as regras gerais.
+GREETING_FOCUS = """MOMENTO DE PRIMEIRO CONTATO. Cliente acabou de chegar — NUNCA TEVE CONVERSA ANTES.
+
+LEIA o historico de mensagens. Se voce ja se apresentou ou ja tem informacao do lead,
+NAO esta no momento de saudacao — voce esta CONTINUANDO conversa, nao iniciando.
+Nesse caso, NAO faca pergunta de plataforma de novo, NAO se apresente de novo.
+Cumprimente curto ("eai!", "tudo bem?") e CONTINUE do ponto onde a conversa parou.
+
+Se cliente realmente nao tem historico (1a vez): seja caloroso, descubra nome se nao souber,
+e DE O PRIMEIRO PASSO que as regras gerais ja definidas acima exigem (ex: perguntar plataforma).
+
+RESPEITE 100% as regras gerais. NUNCA repita pergunta ja feita.
 
 Tag: [AGENDAR: 20]."""
 
