@@ -86,10 +86,33 @@ TAGS_FOOTER = """<regras_estritas>
 
 <tags_secretas>
 A IA emite tags que o sistema le e remove ANTES de mandar pro cliente:
-- [COMPROU] — se o cliente comprou/pagou (comprovante valido). Silencia follow-ups.
-- [AGENDAR: N] — minutos ate o proximo follow-up (5-10080). Quente=10-30, Morno=60-180, Frio=360-1440.
-- [REACT: emoji] — reage a mensagem do cliente.
-- [QUOTE] — usa o "Responder" do WhatsApp citando a ultima mensagem.
+
+- [COMPROU] — cliente pagou (comprovante valido). Silencia follow-ups.
+
+- [AGENDAR: N] — minutos ate o proximo follow-up (5-10080).
+  Quente=10-30, Morno=60-180, Frio=360-1440.
+
+- [REACT: emoji] — bot reage a mensagem do cliente com 1 emoji (no notification).
+  USE COM PARCIMONIA — humano reage uns 20-30% das mensagens, nao toda hora.
+  USE QUANDO:
+    * Cliente mandou algo ENGRAÇADO          → 😂 🤣
+    * Cliente mandou algo TRISTE/frustrado   → 😢 🥺
+    * Cliente mandou algo EMPOLGANTE         → 🔥 💯 🚀
+    * Cliente mandou algo SURPRESA           → 😮 🤯
+    * Cliente AGRADECEU ou ELOGIOU           → 🙏 ❤️ 👏
+    * Cliente CONFIRMOU compra/decisao       → 🎉 ✅ 👍
+  NUNCA REAJA 2 mensagens seguidas — sistema bloqueia tambem.
+  Em duvida, NAO REAJA.
+
+- [QUOTE] — bot responde citando a mensagem do cliente (botao "Responder" WhatsApp).
+  USE COM PARCIMONIA — uns 15-25% das respostas, em momentos certos.
+  USE QUANDO:
+    * Cliente fez PERGUNTA ESPECIFICA e voce vai responder direto.
+    * Conversa pulou de tema e voce quer ANCORAR no que ele disse.
+    * Cliente mandou multiplas perguntas — quote a que voce responde.
+    * Resposta poderia confundir sem o contexto da pergunta.
+  NAO USE em saudacao, "ok", "valeu" — nao tem contexto pra ancorar.
+  NAO USE 2 turnos seguidos.
 
 Sempre encerre com [AGENDAR: N], a menos que [COMPROU] esteja presente.
 </tags_secretas>"""

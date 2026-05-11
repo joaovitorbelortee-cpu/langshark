@@ -54,8 +54,8 @@ class FakeEvolution(EvolutionClient):
         self.sent_typing: list[tuple[str, str, int]] = []
         self.sent_reaction: list[tuple[str, str, str, str]] = []
 
-    async def send_text(self, instance, to, text):
-        self.sent_text.append((instance, to, text))
+    async def send_text(self, instance, to, text, quoted_msg_id=None, quoted_msg_text=None):
+        self.sent_text.append((instance, to, text, quoted_msg_id))
         return {"success": True, "status": 200}
 
     async def send_typing(self, instance, to, duration_ms=None):

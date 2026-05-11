@@ -255,13 +255,15 @@ COISAS QUE VOCE NUNCA FAZ:
 
 <tags_secretas>
 A IA emite tags que o sistema le e remove ANTES de mandar pro cliente:
-- [COMPROU] — se o cliente comprou/pagou (comprovante valido). Silencia follow-ups.
-- [AGENDAR: N] — minutos ate o proximo follow-up (5-10080). Leia temperatura:
-    Quente (perguntou preco, escolheu plano): 10-30 min.
-    Morno ("vou ver", "depois"): 60-180 min.
-    Frio (sumiu): 360-1440 min.
-- [REACT: emoji] — reage a mensagem do cliente com um emoji (opcional).
-- [QUOTE] — usa o "Responder" do WhatsApp citando a ultima mensagem.
+- [COMPROU] — cliente pagou (comprovante valido). Silencia follow-ups.
+- [AGENDAR: N] — minutos ate o proximo follow-up (5-10080).
+    Quente=10-30, Morno=60-180, Frio=360-1440.
+- [REACT: emoji] — bot reage com 1 emoji. PARCIMONIA: 20-30% das msgs.
+    Use SO quando: engraçada(😂), triste(😢), empolgante(🔥), surpresa(😮),
+    agradecimento(🙏), confirmou compra(🎉). Nunca 2 seguidas.
+- [QUOTE] — bot cita msg do cliente (Responder WhatsApp). 15-25% das respostas.
+    Use SO quando: pergunta especifica, mudanca de tema, multiplas perguntas.
+    Nunca em saudacao/ok/valeu. Nunca 2 seguidas.
 
 Sempre encerre com [AGENDAR: N], a menos que [COMPROU] esteja presente.
 </tags_secretas>"""
@@ -984,6 +986,11 @@ async def send_node(state: SalesState) -> dict[str, Any]:
     instance = state["instance_name"]
     phone = state["phone"]
     message_id = state.get("message_id", "")
+    redis = get_redis()
+
+    # Cooldowns server-side — bloqueia spam mesmo se LLM emitir tags em sequência
+    REACT_COOLDOWN_S = 240   # 4 min
+    QUOTE_COOLDOWN_S = 180   # 3 min
 
     # Marca mensagem do cliente como LIDA antes de qualquer resposta
     # → faz aparecer ✓✓ azul (2 tiques azuis) no WhatsApp do cliente
@@ -1005,23 +1012,54 @@ async def send_node(state: SalesState) -> dict[str, Any]:
     if not chunks:
         return {"sent": False, "sent_count": 0}
 
-    # Reação opcional (antes das bolhas, igual ao bot antigo)
+    # Reação opcional — cooldown server-side garante não-spam
     react_emoji = state.get("react_emoji")
     if react_emoji and message_id:
         try:
-            await evo.send_reaction(instance, phone, message_id, react_emoji)
+            last_react = await redis._cmd("GET", f"react_last:{instance}:{phone}")
+            if not last_react:
+                await evo.send_reaction(instance, phone, message_id, react_emoji)
+                await redis._cmd("SET", f"react_last:{instance}:{phone}", "1",
+                                 "EX", str(REACT_COOLDOWN_S))
+                log.info("[send] react %s/%s emoji=%s", instance, phone, react_emoji)
+            else:
+                log.debug("[send] react cooldown ativo — pula %s/%s", instance, phone)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
             log.debug("[send] reaction falhou (cosmético): %s", exc)
 
+    # Quote — só na primeira bolha, com cooldown server-side
+    quote_id: str | None = None
+    quote_text: str | None = None
+    if state.get("quote_previous") and message_id:
+        try:
+            last_quote = await redis._cmd("GET", f"quote_last:{instance}:{phone}")
+            if not last_quote:
+                quote_id = message_id
+                quote_text = state.get("user_message") or None
+                await redis._cmd("SET", f"quote_last:{instance}:{phone}", "1",
+                                 "EX", str(QUOTE_COOLDOWN_S))
+                log.info("[send] quote %s/%s msg=%s", instance, phone, message_id)
+            else:
+                log.debug("[send] quote cooldown ativo — pula %s/%s", instance, phone)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("[send] quote cooldown check falhou: %s", exc)
+
     sent = 0
     for i, chunk in enumerate(chunks):
         delay = typing_delay_ms(chunk)
+        # Quote só primeira bolha (chunks subsequentes = continuação)
+        chunk_quote_id = quote_id if i == 0 else None
+        chunk_quote_text = quote_text if i == 0 else None
         try:
             await evo.send_typing(instance, phone, duration_ms=delay)
             await asyncio.sleep(delay / 1000)
-            r = await evo.send_text(instance, phone, chunk)
+            r = await evo.send_text(
+                instance, phone, chunk,
+                quoted_msg_id=chunk_quote_id,
+                quoted_msg_text=chunk_quote_text,
+            )
             if r.get("success"):
                 sent += 1
             if i < len(chunks) - 1:

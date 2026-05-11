@@ -9,6 +9,7 @@ import os
 import random
 import re
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 
@@ -309,8 +310,31 @@ class EvolutionClient:
 
         return last_err or {"success": False, "error": "unknown"}
 
-    async def send_text(self, instance: str, to: str, text: str) -> dict:
-        return await self._post(f"/message/sendText/{instance}", {"number": to, "text": text})
+    async def send_text(
+        self,
+        instance: str,
+        to: str,
+        text: str,
+        quoted_msg_id: str | None = None,
+        quoted_msg_text: str | None = None,
+    ) -> dict:
+        """
+        Envia texto. Se quoted_msg_id fornecido, usa o "Responder" do WhatsApp
+        (formato Evolution v2 `quoted` field).
+        """
+        body: dict[str, Any] = {"number": to, "text": text}
+        if quoted_msg_id:
+            quoted_block: dict[str, Any] = {
+                "key": {
+                    "remoteJid": f"{to}@s.whatsapp.net",
+                    "fromMe": False,
+                    "id": quoted_msg_id,
+                },
+            }
+            if quoted_msg_text:
+                quoted_block["message"] = {"conversation": quoted_msg_text[:500]}
+            body["quoted"] = quoted_block
+        return await self._post(f"/message/sendText/{instance}", body)
 
     async def send_typing(self, instance: str, to: str, duration_ms: int | None = None) -> dict:
         body: dict = {"number": to, "presence": "composing"}
