@@ -87,9 +87,20 @@ async def me(
 # Projects (read-only F1)
 # ────────────────────────────────────────────────────────────────────
 
+def _user_can_access_project(user: dict[str, Any], project_id: str) -> bool:
+    """Multi-tenant guard: user.project_ids vazio = acesso total (admin global)."""
+    allowed = user.get("project_ids") or []
+    return (not allowed) or (project_id in allowed)
+
+
 @admin_router.get("/projects")
-async def list_projects() -> list[dict[str, Any]]:
+async def list_projects(
+    user: Annotated[dict[str, Any], Depends(require_admin)],
+) -> list[dict[str, Any]]:
     rows = await _project_repo.list()
+    allowed = user.get("project_ids") or []
+    if allowed:
+        rows = [r for r in rows if r["project_id"] in allowed]
     # Resposta enxuta — detail tem o resto
     return [
         {
@@ -105,7 +116,12 @@ async def list_projects() -> list[dict[str, Any]]:
 
 
 @admin_router.get("/projects/{project_id}")
-async def get_project(project_id: str) -> dict[str, Any]:
+async def get_project(
+    project_id: str,
+    user: Annotated[dict[str, Any], Depends(require_admin)],
+) -> dict[str, Any]:
+    if not _user_can_access_project(user, project_id):
+        raise HTTPException(status_code=403, detail="Forbidden")
     cfg = await _project_repo.fetch(project_id)
     if not cfg:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
@@ -129,9 +145,11 @@ def _invalidate_cache(project_id: str) -> None:
 async def patch_section(
     project_id: str,
     section_key: str,
+    user: Annotated[dict[str, Any], Depends(require_admin)],
     body: dict = Body(...),
-    user: Annotated[dict[str, Any], Depends(require_admin)] = None,  # type: ignore
 ) -> dict[str, Any]:
+    if not _user_can_access_project(user, project_id):
+        raise HTTPException(status_code=403, detail="Forbidden")
     valid_keys = {"company_info", "prices", "parameters", "priority_situations", "knowledge_base"}
     if section_key not in valid_keys:
         raise HTTPException(status_code=400, detail=f"section_key invalido. validos: {valid_keys}")
@@ -146,9 +164,11 @@ async def patch_section(
 @admin_router.patch("/projects/{project_id}/config")
 async def patch_config(
     project_id: str,
+    user: Annotated[dict[str, Any], Depends(require_admin)],
     body: dict = Body(...),
-    user: Annotated[dict[str, Any], Depends(require_admin)] = None,  # type: ignore
 ) -> dict[str, Any]:
+    if not _user_can_access_project(user, project_id):
+        raise HTTPException(status_code=403, detail="Forbidden")
     allowed = {"agent_name", "ai_model", "ai_temperature", "ai_max_tokens", "is_active", "display_name"}
     payload = {k: v for k, v in body.items() if k in allowed}
     if not payload:
@@ -163,7 +183,9 @@ async def patch_config(
 # ────────────────────────────────────────────────────────────────────
 
 @admin_router.get("/models")
-async def list_models() -> list[dict[str, Any]]:
+async def list_models(
+    user: Annotated[dict[str, Any], Depends(require_admin)],
+) -> list[dict[str, Any]]:
     return await _models_repo.list(only_active=True)
 
 
@@ -172,7 +194,9 @@ async def list_models() -> list[dict[str, Any]]:
 # ────────────────────────────────────────────────────────────────────
 
 @admin_router.get("/instances")
-async def list_instances() -> list[dict[str, Any]]:
+async def list_instances(
+    user: Annotated[dict[str, Any], Depends(require_admin)],
+) -> list[dict[str, Any]]:
     """
     Lista instâncias da Evolution API + status de conexão.
     F1: read-only. POST/DELETE em F4.
@@ -217,14 +241,16 @@ def _evolution_creds() -> tuple[str, str]:
 
 @admin_router.post("/instances")
 async def create_instance(
+    user: Annotated[dict[str, Any], Depends(require_admin)],
     body: dict = Body(...),
-    user: Annotated[dict[str, Any], Depends(require_admin)] = None,  # type: ignore
 ) -> dict[str, Any]:
     """Cria instância Evolution + opcionalmente bind a project_id."""
     name = (body.get("instance_name") or "").strip()
     project_id = (body.get("project_id") or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="instance_name obrigatorio")
+    if project_id and not _user_can_access_project(user, project_id):
+        raise HTTPException(status_code=403, detail="Forbidden: project_id fora do escopo")
     base_url, api_key = _evolution_creds()
     if not base_url:
         raise HTTPException(status_code=503, detail="EVOLUTION_API_URL ausente")
@@ -255,7 +281,7 @@ async def create_instance(
 @admin_router.delete("/instances/{instance_name}")
 async def delete_instance(
     instance_name: str,
-    user: Annotated[dict[str, Any], Depends(require_admin)] = None,  # type: ignore
+    user: Annotated[dict[str, Any], Depends(require_admin)],
 ) -> dict[str, Any]:
     base_url, api_key = _evolution_creds()
     if not base_url:
@@ -273,7 +299,7 @@ async def delete_instance(
 @admin_router.get("/instances/{instance_name}/qr")
 async def get_instance_qr(
     instance_name: str,
-    user: Annotated[dict[str, Any], Depends(require_admin)] = None,  # type: ignore
+    user: Annotated[dict[str, Any], Depends(require_admin)],
 ) -> dict[str, Any]:
     base_url, api_key = _evolution_creds()
     import httpx
@@ -288,7 +314,7 @@ async def get_instance_qr(
 @admin_router.get("/instances/{instance_name}/status")
 async def get_instance_status(
     instance_name: str,
-    user: Annotated[dict[str, Any], Depends(require_admin)] = None,  # type: ignore
+    user: Annotated[dict[str, Any], Depends(require_admin)],
 ) -> dict[str, Any]:
     base_url, api_key = _evolution_creds()
     import httpx
@@ -313,18 +339,22 @@ _products_repo = ProductsRepo()
 
 @admin_router.get("/flows")
 async def list_flows(
+    user: Annotated[dict[str, Any], Depends(require_admin)],
     project_id: str = "padrao",
-    user: Annotated[dict[str, Any], Depends(require_admin)] = None,  # type: ignore
 ) -> list[dict[str, Any]]:
+    if not _user_can_access_project(user, project_id):
+        raise HTTPException(status_code=403, detail="Forbidden")
     return await _flows_repo.list(project_id=project_id)
 
 
 @admin_router.post("/flows")
 async def create_flow(
+    user: Annotated[dict[str, Any], Depends(require_admin)],
     body: dict = Body(...),
-    user: Annotated[dict[str, Any], Depends(require_admin)] = None,  # type: ignore
 ) -> dict[str, Any]:
     project_id = body.get("project_id") or "padrao"
+    if not _user_can_access_project(user, project_id):
+        raise HTTPException(status_code=403, detail="Forbidden")
     name = (body.get("name") or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="name obrigatorio")
@@ -341,8 +371,8 @@ async def create_flow(
 @admin_router.patch("/flows/{flow_id}")
 async def patch_flow(
     flow_id: str,
+    user: Annotated[dict[str, Any], Depends(require_admin)],
     body: dict = Body(...),
-    user: Annotated[dict[str, Any], Depends(require_admin)] = None,  # type: ignore
 ) -> dict[str, Any]:
     allowed = {"name", "description", "steps", "enabled"}
     payload = {k: v for k, v in body.items() if k in allowed}
@@ -353,7 +383,7 @@ async def patch_flow(
 @admin_router.delete("/flows/{flow_id}")
 async def delete_flow(
     flow_id: str,
-    user: Annotated[dict[str, Any], Depends(require_admin)] = None,  # type: ignore
+    user: Annotated[dict[str, Any], Depends(require_admin)],
 ) -> dict[str, Any]:
     ok = await _flows_repo.delete(flow_id)
     return {"ok": ok}
@@ -365,23 +395,28 @@ async def delete_flow(
 
 @admin_router.get("/products")
 async def list_products(
+    user: Annotated[dict[str, Any], Depends(require_admin)],
     project_id: str = "padrao",
-    user: Annotated[dict[str, Any], Depends(require_admin)] = None,  # type: ignore
 ) -> list[dict[str, Any]]:
+    if not _user_can_access_project(user, project_id):
+        raise HTTPException(status_code=403, detail="Forbidden")
     return await _products_repo.list(project_id=project_id)
 
 
 @admin_router.post("/products")
 async def create_product(
+    user: Annotated[dict[str, Any], Depends(require_admin)],
     body: dict = Body(...),
-    user: Annotated[dict[str, Any], Depends(require_admin)] = None,  # type: ignore
 ) -> dict[str, Any]:
+    project_id = body.get("project_id") or "padrao"
+    if not _user_can_access_project(user, project_id):
+        raise HTTPException(status_code=403, detail="Forbidden")
     name = (body.get("name") or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="name obrigatorio")
     row = await _products_repo.insert({
         "id":          body.get("id"),  # auto-uuid se vazio
-        "project_id":  body.get("project_id") or "padrao",
+        "project_id":  project_id,
         "name":        name,
         "description": body.get("description") or "",
         "price":       body.get("price"),
@@ -393,8 +428,8 @@ async def create_product(
 @admin_router.patch("/products/{product_id}")
 async def patch_product(
     product_id: str,
+    user: Annotated[dict[str, Any], Depends(require_admin)],
     body: dict = Body(...),
-    user: Annotated[dict[str, Any], Depends(require_admin)] = None,  # type: ignore
 ) -> dict[str, Any]:
     allowed = {"name", "description", "price", "metadata"}
     payload = {k: v for k, v in body.items() if k in allowed}
@@ -405,7 +440,7 @@ async def patch_product(
 @admin_router.delete("/products/{product_id}")
 async def delete_product(
     product_id: str,
-    user: Annotated[dict[str, Any], Depends(require_admin)] = None,  # type: ignore
+    user: Annotated[dict[str, Any], Depends(require_admin)],
 ) -> dict[str, Any]:
     ok = await _products_repo.delete(product_id)
     return {"ok": ok}

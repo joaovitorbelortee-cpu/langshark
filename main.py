@@ -65,6 +65,33 @@ app = FastAPI(title="bot-vendas", lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    """
+    Headers de segurança padrão pra todas as respostas.
+    CSP libera Alpine/HTMX/Inter via CDN (necessários pro painel).
+    """
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+    # CSP só pra rotas do painel HTML — webhooks JSON não precisam.
+    path = request.url.path
+    if path.startswith("/admin") and not path.startswith("/admin/static"):
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com; "
+            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+            "font-src 'self' https://fonts.gstatic.com; "
+            "img-src 'self' data: https:; "
+            "connect-src 'self'; "
+            "frame-ancestors 'none'",
+        )
+    return response
+
 # Painel admin
 from pathlib import Path  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402

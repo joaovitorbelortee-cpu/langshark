@@ -8,6 +8,7 @@ Pub/sub Redis cross-worker fica pra F7 (atualmente Railway = 1 worker).
 """
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -21,24 +22,33 @@ class ProjectConfigCache:
     def __init__(self) -> None:
         self._store: dict[str, tuple[dict[str, Any], float]] = {}
         self._repo = ProjectConfigRepo()
+        self._lock = asyncio.Lock()
 
     async def get(self, project_id: str) -> dict[str, Any]:
-        now = time.time()
+        now = time.monotonic()
         cached = self._store.get(project_id)
         if cached and cached[1] > now:
             return cached[0]
 
-        cfg = await self._repo.fetch(project_id) or {}
-        self._store[project_id] = (cfg, now + self._TTL)
-        if len(self._store) > self._MAX:
-            self._evict_oldest()
-        return cfg
+        # Single-flight: evita cache stampede quando vários webhooks chegam ao mesmo tempo.
+        async with self._lock:
+            cached = self._store.get(project_id)
+            now = time.monotonic()
+            if cached and cached[1] > now:
+                return cached[0]
+            cfg = await self._repo.fetch(project_id) or {}
+            self._store[project_id] = (cfg, now + self._TTL)
+            if len(self._store) > self._MAX:
+                self._evict_oldest()
+            return cfg
 
     def invalidate(self, project_id: str) -> None:
         self._store.pop(project_id, None)
 
     def _evict_oldest(self) -> None:
         # Remove entrada com expires_at mais próximo do passado
+        if not self._store:
+            return
         oldest = min(self._store.items(), key=lambda kv: kv[1][1])
         self._store.pop(oldest[0], None)
 

@@ -7,11 +7,14 @@ add_messages.
 """
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage
 from langchain_openai import ChatOpenAI
+
+log = logging.getLogger("agent.nodes")
 
 from agent.flows import flows_prompt_block, get_flow, parse_flow_tag
 from agent.state import Intent, SalesState
@@ -60,6 +63,14 @@ def get_tenant_resolver() -> TenantResolver:
     return _tenant
 
 
+def _llm_timeout_seconds() -> float:
+    """Timeout duro pra chamada LLM. Evita webhook pendurado se provider travar."""
+    try:
+        return float(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
+    except (TypeError, ValueError):
+        return 30.0
+
+
 def _make_llm(
     temperature: float = 0.7,
     max_tokens: int = 1000,
@@ -75,6 +86,8 @@ def _make_llm(
         base_url=os.getenv("AI_BASE_URL", "https://openrouter.ai/api/v1"),
         temperature=temperature,
         max_tokens=max_tokens,
+        timeout=_llm_timeout_seconds(),
+        max_retries=2,
         default_headers={
             "HTTP-Referer": os.getenv("AI_REFERRER", "https://bot-vendas.local"),
             "X-Title": "bot-vendas",
@@ -819,7 +832,12 @@ async def flow_executor_node(state: SalesState) -> dict[str, Any]:
                     )
                     if r.is_success:
                         sent += 1
-        except Exception:  # noqa: BLE001
+                    else:
+                        log.warning("[flow] sendMedia falhou %s: %s", r.status_code, r.text[:160])
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[flow] step %s falhou: %s", step.get("type"), exc)
             # Não derruba o grafo — segue pro próximo step.
             continue
 
@@ -879,8 +897,10 @@ async def send_node(state: SalesState) -> dict[str, Any]:
     if react_emoji and message_id:
         try:
             await evo.send_reaction(instance, phone, message_id, react_emoji)
-        except Exception:  # noqa: BLE001
-            pass  # reação é cosmético; não falha o envio
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.debug("[send] reaction falhou (cosmético): %s", exc)
 
     sent = 0
     for i, chunk in enumerate(chunks):
@@ -893,7 +913,10 @@ async def send_node(state: SalesState) -> dict[str, Any]:
                 sent += 1
             if i < len(chunks) - 1:
                 await asyncio.sleep(jitter_between_bubbles_ms() / 1000)
-        except Exception:  # noqa: BLE001
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[send] bolha %d falhou: %s", i, exc)
             # Não derruba o grafo — registra parcial e segue.
             continue
 

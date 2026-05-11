@@ -50,7 +50,8 @@ def verify_password(plain: str, hashed: str) -> bool:
         return False
     try:
         return bcrypt.checkpw(_bcrypt_bytes(plain), hashed.encode("utf-8"))
-    except Exception:
+    except (ValueError, TypeError):
+        # Hash mal formado no DB ou encoding errado — não engole CancelledError.
         return False
 
 
@@ -86,7 +87,7 @@ def set_session_cookie(response: Response, token: str) -> None:
         max_age=TOKEN_TTL_HOURS * 3600,
         httponly=True,
         secure=True,        # HTTPS only — Railway sempre HTTPS
-        samesite="lax",
+        samesite="strict",  # CSRF defense: cookie não viaja em cross-site nav
         path="/",
     )
 

@@ -81,21 +81,32 @@ async def logout():
 # Dashboard (protegido)
 # ────────────────────────────────────────────────────────────────────
 
-def _pick_current_project(projects: list[dict[str, Any]], requested: str | None) -> dict[str, Any] | None:
-    """Resolve projeto atual: query string > 'padrao' > primeiro com agent_name > primeiro."""
-    if not projects:
+def _pick_current_project(
+    projects: list[dict[str, Any]],
+    requested: str | None,
+    user: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """
+    Resolve projeto atual: query string (se autorizado) > 'padrao' > 1º com agent_name > 1º.
+
+    Multi-tenant: se user tem project_ids restrito, só seleciona dentre os autorizados.
+    """
+    allowed = (user or {}).get("project_ids") or []
+    pool = [p for p in projects if (not allowed) or (p["project_id"] in allowed)]
+    if not pool:
         return None
     if requested:
-        for p in projects:
+        for p in pool:
             if p["project_id"] == requested:
                 return p
-    for p in projects:
+        # query string aponta pra projeto fora do escopo — ignora silenciosamente
+    for p in pool:
         if p["project_id"] == "padrao":
             return p
-    for p in projects:
+    for p in pool:
         if p.get("agent_name"):
             return p
-    return projects[0]
+    return pool[0]
 
 
 @views_router.get("", response_class=HTMLResponse)
@@ -105,7 +116,7 @@ async def dashboard(
     user: Annotated[dict[str, Any], Depends(require_admin)],
 ):
     projects = await _project_repo.list()
-    current = _pick_current_project(projects, request.query_params.get("project_id"))
+    current = _pick_current_project(projects, request.query_params.get("project_id"), user)
     kpis = {
         "instances_online": 1,
         "messages_24h": 0,
@@ -135,7 +146,7 @@ async def agent_page(
     user: Annotated[dict[str, Any], Depends(require_admin)],
 ):
     projects = await _project_repo.list()
-    current = _pick_current_project(projects, request.query_params.get("project_id"))
+    current = _pick_current_project(projects, request.query_params.get("project_id"), user)
     pid = current["project_id"] if current else "padrao"
     cfg = await _project_repo.fetch(pid) or {}
     models = await _models_repo.list()
@@ -160,7 +171,7 @@ async def instances_page(
     user: Annotated[dict[str, Any], Depends(require_admin)],
 ):
     projects = await _project_repo.list()
-    current = _pick_current_project(projects, request.query_params.get("project_id"))
+    current = _pick_current_project(projects, request.query_params.get("project_id"), user)
     return templates.TemplateResponse(
         request,
         "instances.html",
@@ -177,7 +188,7 @@ async def flows_page(
     user: Annotated[dict[str, Any], Depends(require_admin)],
 ):
     projects = await _project_repo.list()
-    current = _pick_current_project(projects, request.query_params.get("project_id"))
+    current = _pick_current_project(projects, request.query_params.get("project_id"), user)
     return templates.TemplateResponse(
         request,
         "flows.html",
@@ -194,7 +205,7 @@ async def knowledge_page(
     user: Annotated[dict[str, Any], Depends(require_admin)],
 ):
     projects = await _project_repo.list()
-    current = _pick_current_project(projects, request.query_params.get("project_id"))
+    current = _pick_current_project(projects, request.query_params.get("project_id"), user)
     return templates.TemplateResponse(
         request,
         "knowledge.html",
@@ -211,7 +222,7 @@ async def recovery_page(
     user: Annotated[dict[str, Any], Depends(require_admin)],
 ):
     projects = await _project_repo.list()
-    current = _pick_current_project(projects, request.query_params.get("project_id"))
+    current = _pick_current_project(projects, request.query_params.get("project_id"), user)
     cfg = await _project_repo.fetch(current["project_id"]) if current else {}
     return templates.TemplateResponse(
         request,
@@ -231,7 +242,7 @@ async def settings_page(
 ):
     import os
     projects = await _project_repo.list()
-    current = _pick_current_project(projects, request.query_params.get("project_id"))
+    current = _pick_current_project(projects, request.query_params.get("project_id"), user)
     env_status = {
         "webhook_url":  f"https://{os.getenv('PUBLIC_BASE_URL', 'bot-vendas-production-0be5.up.railway.app').replace('https://','').rstrip('/')}/webhook/evolution",
         "evolution":    bool(os.getenv("EVOLUTION_API_URL")),

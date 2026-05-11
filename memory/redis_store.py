@@ -58,18 +58,26 @@ class RedisStore:
         return bool(self.url and self.token)
 
     async def _cmd(self, *parts: str) -> Any:
-        """Executa um comando Redis via REST. Cai pra fallback in-memory se faltar config."""
+        """
+        Executa comando Redis via REST. Fallback in-memory se REST indisponível
+        OU em caso de erro de rede/timeout — bot não pode derrubar webhook por flaky Redis.
+        """
         if not self.remote_enabled:
             return self._local_cmd(parts)
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            r = await client.post(
-                self.url,
-                headers={"Authorization": f"Bearer {self.token}"},
-                json=list(parts),
-            )
-            r.raise_for_status()
-            return r.json().get("result")
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                r = await client.post(
+                    self.url,
+                    headers={"Authorization": f"Bearer {self.token}"},
+                    json=list(parts),
+                )
+                r.raise_for_status()
+                return r.json().get("result")
+        except (httpx.HTTPError, ValueError):
+            # Network error, timeout, 5xx → degrade pra in-memory; perdemos persistência
+            # entre processos mas mantemos webhook funcionando.
+            return self._local_cmd(parts)
 
     def _local_cmd(self, parts: tuple[str, ...]) -> Any:
         cmd = parts[0].upper()
@@ -100,8 +108,15 @@ class RedisStore:
                     i += 1
                 else:
                     i += 1
-            if nx and parts[1] in self._fallback:
-                return None
+            if nx:
+                # NX deve respeitar TTL: se chave expirou, deixa sobrescrever.
+                existing = self._fallback.get(key)
+                if existing is not None:
+                    _, exp_existing = existing
+                    if exp_existing is None or exp_existing > now:
+                        return None  # chave viva → NX falha
+                    # expirou → cai pra escrita
+                    self._fallback.pop(key, None)
             self._fallback[key] = (value, exp)
             return "OK"
 

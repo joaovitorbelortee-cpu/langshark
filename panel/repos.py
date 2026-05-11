@@ -12,8 +12,14 @@ import httpx
 
 
 def _supabase_creds() -> tuple[str, str]:
+    """
+    Sempre exige SERVICE_KEY pro painel admin — anon_key não tem privilégio em RLS.
+    Fallback pra anon só permitido se SUPABASE_ALLOW_ANON=1 (dev local).
+    """
     url = (os.getenv("SUPABASE_URL") or "").rstrip("/")
-    key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY") or ""
+    key = (os.getenv("SUPABASE_SERVICE_KEY") or "").strip()
+    if not key and os.getenv("SUPABASE_ALLOW_ANON") == "1":
+        key = (os.getenv("SUPABASE_ANON_KEY") or "").strip()
     return url, key
 
 
@@ -143,14 +149,22 @@ class AdminUsersRepo:
             return data[0] if data else {}
 
     async def touch_login(self, user_id: str) -> None:
+        from datetime import datetime, timezone
         url, _ = _supabase_creds()
+        if not url:
+            return
         async with httpx.AsyncClient(timeout=5.0) as c:
-            await c.patch(
-                f"{url}/rest/v1/admin_users",
-                params={"id": f"eq.{user_id}"},
-                headers=_headers(),
-                json={"last_login_at": "now()"},
-            )
+            try:
+                r = await c.patch(
+                    f"{url}/rest/v1/admin_users",
+                    params={"id": f"eq.{user_id}"},
+                    headers=_headers(),
+                    json={"last_login_at": datetime.now(timezone.utc).isoformat()},
+                )
+                r.raise_for_status()
+            except httpx.HTTPError:
+                # Login bem-sucedido não deve falhar por touch_login flaky.
+                pass
 
 
 # ────────────────────────────────────────────────────────────────────

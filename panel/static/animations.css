@@ -114,6 +114,22 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 }
 button:focus:not(:focus-visible), a:focus:not(:focus-visible) { outline: none; }
 
+/* ────── prefers-reduced-motion ────── */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .status-dot.status-open,
+  .status-dot.status-connecting,
+  .sidebar::after,
+  .btn-primary::before { animation: none !important; }
+}
+
 /* ────── code/inline-code ────── */
 code {
   background: var(--bg-input);

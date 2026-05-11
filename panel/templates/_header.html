@@ -1,7 +1,11 @@
-<header class="header">
+<header class="header" x-data="{ mobileNav: false }" @keydown.escape.window="mobileNav = false">
   <div class="header-left">
-    <button class="icon-btn" aria-label="Menu" type="button">
-      <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <button class="icon-btn header-menu-btn"
+            aria-label="Abrir menu de navegação"
+            type="button"
+            @click="mobileNav = !mobileNav"
+            :aria-expanded="mobileNav.toString()">
+      <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
         <line x1="3" y1="12" x2="21" y2="12"/>
         <line x1="3" y1="6" x2="21" y2="6"/>
         <line x1="3" y1="18" x2="21" y2="18"/>
@@ -9,6 +13,19 @@
     </button>
     <h1 class="page-title">{% block page_title %}{{ active_section|capitalize }}{% endblock %}</h1>
   </div>
+
+  <!-- Drawer mobile: clone simplificado do sidebar -->
+  <div class="mobile-drawer-backdrop" x-show="mobileNav" x-transition.opacity @click="mobileNav = false" style="display:none;"></div>
+  <aside class="mobile-drawer" x-show="mobileNav" x-transition:enter="drawer-enter" style="display:none;" aria-label="Menu de navegação mobile">
+    <a class="mobile-nav-item" href="/admin">📊 Dashboard</a>
+    <a class="mobile-nav-item" href="/admin/instances">📱 Instâncias</a>
+    <a class="mobile-nav-item" href="/admin/agent">🤖 Agente</a>
+    <a class="mobile-nav-item" href="/admin/flows">⚡ Fluxos</a>
+    <a class="mobile-nav-item" href="/admin/knowledge">📖 Base</a>
+    <a class="mobile-nav-item" href="/admin/recovery">🔄 Reconquista</a>
+    <a class="mobile-nav-item" href="/admin/settings">⚙ Configurações</a>
+    <a class="mobile-nav-item logout" href="/admin/logout">↪ Sair</a>
+  </aside>
 
   <div class="header-right">
     {% if current_project and current_project.ai_model %}

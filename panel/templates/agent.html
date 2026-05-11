@@ -57,22 +57,35 @@
   <p class="page-foot-info" style="margin: 12px 0 0;">Clique em qualquer card pra editar. Ctrl/Cmd+S salva.</p>
 
   <!-- ─── Modal editor ─── -->
-  <div class="modal-overlay" x-show="editing" x-transition.opacity @click.self="cancelEdit()" style="display:none;">
-    <div class="modal-card" @keydown.escape.window="cancelEdit()">
+  <div class="modal-overlay"
+       x-show="editing"
+       x-transition.opacity
+       @click.self="tryCancelEdit()"
+       @keydown.escape.window="editing && tryCancelEdit()"
+       role="dialog"
+       aria-modal="true"
+       aria-labelledby="modal-title"
+       style="display:none;">
+    <div class="modal-card">
       <header class="modal-head">
-        <h3 class="modal-title" x-text="editingTitle"></h3>
+        <h3 class="modal-title" id="modal-title" x-text="editingTitle"></h3>
         <div class="modal-actions">
-          <span class="char-count" x-text="charCount + '/7000'"></span>
-          <button class="btn btn-secondary" type="button" @click="cancelEdit()">Cancelar</button>
-          <button class="btn btn-primary" type="button" @click="saveSection()">Salvar (Ctrl+S)</button>
+          <span class="char-count" x-text="charCount + '/7000'" :class="charCount > 7000 ? 'char-over' : ''"></span>
+          <span class="dirty-dot" x-show="isDirty" title="Alterações não salvas">●</span>
+          <button class="btn btn-secondary" type="button" @click="tryCancelEdit()">Cancelar</button>
+          <button class="btn btn-primary" type="button" @click="saveSection()" :disabled="saving">
+            <span x-show="!saving">Salvar (Ctrl+S)</span>
+            <span x-show="saving">Salvando...</span>
+          </button>
         </div>
       </header>
       <textarea class="editor-textarea"
                 x-ref="textarea"
                 x-model="editingContent"
-                @input="charCount = $event.target.value.length"
+                @input="charCount = $event.target.value.length; isDirty = (editingContent !== originalContent)"
                 @keydown.ctrl.s.prevent="saveSection()"
                 @keydown.meta.s.prevent="saveSection()"
+                aria-label="Conteúdo da seção"
                 placeholder="Escreva esta seção do prompt..."></textarea>
     </div>
   </div>
@@ -91,21 +104,42 @@ function agentPage() {
     editingKey: '',
     editingTitle: '',
     editingContent: '',
+    originalContent: '',
     charCount: 0,
+    isDirty: false,
+    saving: false,
 
     openSection(key) {
       const s = this.sections[key] || {};
       this.editingKey = key;
       this.editingTitle = s.title || key;
       this.editingContent = s.content || '';
+      this.originalContent = this.editingContent;
       this.charCount = this.editingContent.length;
+      this.isDirty = false;
       this.editing = true;
       this.$nextTick(() => this.$refs.textarea && this.$refs.textarea.focus());
     },
 
-    cancelEdit() { this.editing = false; },
+    tryCancelEdit() {
+      if (this.isDirty) {
+        if (!confirm('Você tem alterações não salvas. Descartar?')) return;
+      }
+      this.cancelEdit();
+    },
+
+    cancelEdit() {
+      this.editing = false;
+      this.isDirty = false;
+    },
 
     async saveSection() {
+      if (this.saving) return;
+      if (this.charCount > 7000) {
+        showToast('Conteúdo > 7000 chars. Reduza.', 'error');
+        return;
+      }
+      this.saving = true;
       try {
         const r = await fetch(`/api/admin/projects/${this.projectId}/sections/${this.editingKey}`, {
           method: 'PATCH',
@@ -116,30 +150,40 @@ function agentPage() {
           const err = await r.json().catch(() => ({}));
           throw new Error(err.detail || r.statusText);
         }
-        const data = await r.json();
+        await r.json();
         this.sections[this.editingKey] = { ...this.sections[this.editingKey], content: this.editingContent };
+        this.originalContent = this.editingContent;
+        this.isDirty = false;
         this.editing = false;
         showToast('Seção salva. Bot usa em < 60s.', 'success');
         // Atualiza preview no card sem reload
         const card = document.querySelector(`[data-section-key="${this.editingKey}"]`);
         if (card) {
-          card.querySelector('.section-preview').textContent =
-            this.editingContent ? this.editingContent.slice(0, 160) + (this.editingContent.length > 160 ? '…' : '')
-                                : 'FAQ, detalhes de produto, políticas e informações livres.';
-          card.querySelector('.char-count').textContent = `${this.editingContent.length}/7000`;
+          const preview = card.querySelector('.section-preview');
+          if (preview) {
+            preview.textContent = this.editingContent
+              ? this.editingContent.slice(0, 160) + (this.editingContent.length > 160 ? '…' : '')
+              : 'FAQ, detalhes de produto, políticas e informações livres.';
+          }
+          const cc = card.querySelector('.char-count');
+          if (cc) cc.textContent = `${this.editingContent.length}/7000`;
           const badge = card.querySelector('.section-badge');
-          if (this.editingContent) {
-            badge.classList.add('badge-filled'); badge.classList.remove('badge-empty');
-            badge.textContent = '● Preenchido';
-          } else {
-            badge.classList.add('badge-empty'); badge.classList.remove('badge-filled');
-            badge.textContent = '● Vazio';
+          if (badge) {
+            if (this.editingContent) {
+              badge.classList.add('badge-filled'); badge.classList.remove('badge-empty');
+              badge.textContent = '● Preenchido';
+            } else {
+              badge.classList.add('badge-empty'); badge.classList.remove('badge-filled');
+              badge.textContent = '● Vazio';
+            }
           }
           const bar = card.querySelector('.section-progress .bar');
           if (bar) bar.style.width = `${(this.editingContent.length / 7000 * 100).toFixed(1)}%`;
         }
       } catch (e) {
         showToast('Falha: ' + e.message, 'error');
+      } finally {
+        this.saving = false;
       }
     },
 
@@ -158,5 +202,18 @@ function agentPage() {
     },
   };
 }
+
+// Previne fechar aba com alterações não salvas no editor (Alpine 3.x via Alpine.$data).
+window.addEventListener('beforeunload', (e) => {
+  const root = document.querySelector('[x-data="agentPage()"]');
+  if (!root || !window.Alpine) return;
+  try {
+    const data = window.Alpine.$data(root);
+    if (data && data.isDirty) {
+      e.preventDefault();
+      e.returnValue = '';
+    }
+  } catch (_) { /* Alpine pode não ter inicializado ainda */ }
+});
 </script>
 {% endblock %}
