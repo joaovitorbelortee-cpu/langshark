@@ -81,6 +81,23 @@ async def logout():
 # Dashboard (protegido)
 # ────────────────────────────────────────────────────────────────────
 
+def _pick_current_project(projects: list[dict[str, Any]], requested: str | None) -> dict[str, Any] | None:
+    """Resolve projeto atual: query string > 'padrao' > primeiro com agent_name > primeiro."""
+    if not projects:
+        return None
+    if requested:
+        for p in projects:
+            if p["project_id"] == requested:
+                return p
+    for p in projects:
+        if p["project_id"] == "padrao":
+            return p
+    for p in projects:
+        if p.get("agent_name"):
+            return p
+    return projects[0]
+
+
 @views_router.get("", response_class=HTMLResponse)
 @views_router.get("/", response_class=HTMLResponse)
 async def dashboard(
@@ -88,9 +105,9 @@ async def dashboard(
     user: Annotated[dict[str, Any], Depends(require_admin)],
 ):
     projects = await _project_repo.list()
-    # KPIs mock (reais em F6)
+    current = _pick_current_project(projects, request.query_params.get("project_id"))
     kpis = {
-        "instances_online": 1,           # TODO query Evolution
+        "instances_online": 1,
         "messages_24h": 0,
         "conversions_24h": 0,
         "active_leads": 0,
@@ -101,7 +118,7 @@ async def dashboard(
         {
             "user": user,
             "projects": projects,
-            "current_project": projects[0] if projects else None,
+            "current_project": current,
             "kpis": kpis,
             "active_section": "dashboard",
         },
@@ -118,7 +135,7 @@ async def agent_page(
     user: Annotated[dict[str, Any], Depends(require_admin)],
 ):
     projects = await _project_repo.list()
-    current = projects[0] if projects else None
+    current = _pick_current_project(projects, request.query_params.get("project_id"))
     pid = current["project_id"] if current else "padrao"
     cfg = await _project_repo.fetch(pid) or {}
     models = await _models_repo.list()
@@ -128,7 +145,7 @@ async def agent_page(
         {
             "user": user,
             "projects": projects,
-            "current_project": current,
+            "current_project": current or cfg,
             "config": cfg,
             "sections": (cfg.get("brain_sections") or {}),
             "models": models,
@@ -147,13 +164,14 @@ async def stub_section(
     if section not in valid:
         raise HTTPException(404, "Pagina nao encontrada")
     projects = await _project_repo.list()
+    current = _pick_current_project(projects, request.query_params.get("project_id"))
     return templates.TemplateResponse(
         request,
         "stub.html",
         {
             "user": user,
             "projects": projects,
-            "current_project": projects[0] if projects else None,
+            "current_project": current,
             "active_section": section,
             "section_title": section.capitalize(),
         },

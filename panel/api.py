@@ -113,6 +113,52 @@ async def get_project(project_id: str) -> dict[str, Any]:
 
 
 # ────────────────────────────────────────────────────────────────────
+# Project config — edição (F3)
+# ────────────────────────────────────────────────────────────────────
+
+def _invalidate_cache(project_id: str) -> None:
+    """Invalida cache local + emite pub/sub Redis (cross-worker em F7)."""
+    try:
+        from panel.cache import get_project_config_cache
+        get_project_config_cache().invalidate(project_id)
+    except Exception:
+        pass
+
+
+@admin_router.patch("/projects/{project_id}/sections/{section_key}")
+async def patch_section(
+    project_id: str,
+    section_key: str,
+    body: dict = Body(...),
+    user: Annotated[dict[str, Any], Depends(require_admin)] = None,  # type: ignore
+) -> dict[str, Any]:
+    valid_keys = {"company_info", "prices", "parameters", "priority_situations", "knowledge_base"}
+    if section_key not in valid_keys:
+        raise HTTPException(status_code=400, detail=f"section_key invalido. validos: {valid_keys}")
+    content = body.get("content") or ""
+    if len(content) > 7000:
+        raise HTTPException(status_code=400, detail="Conteudo > 7000 chars")
+    cfg = await _project_repo.patch_section(project_id, section_key, content)
+    _invalidate_cache(project_id)
+    return {"ok": True, "section": section_key, "size": len(content), "config": cfg}
+
+
+@admin_router.patch("/projects/{project_id}/config")
+async def patch_config(
+    project_id: str,
+    body: dict = Body(...),
+    user: Annotated[dict[str, Any], Depends(require_admin)] = None,  # type: ignore
+) -> dict[str, Any]:
+    allowed = {"agent_name", "ai_model", "ai_temperature", "ai_max_tokens", "is_active", "display_name"}
+    payload = {k: v for k, v in body.items() if k in allowed}
+    if not payload:
+        raise HTTPException(status_code=400, detail="Nenhum campo valido pra atualizar")
+    cfg = await _project_repo.patch(project_id, payload)
+    _invalidate_cache(project_id)
+    return {"ok": True, "updated": list(payload.keys()), "config": cfg}
+
+
+# ────────────────────────────────────────────────────────────────────
 # AI Models catalog
 # ────────────────────────────────────────────────────────────────────
 

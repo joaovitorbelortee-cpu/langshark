@@ -1,4 +1,4 @@
-<div class="section-card">
+<div class="section-card" data-section-key="{{ key }}" @click="openSection('{{ key }}')" role="button" tabindex="0">
   <div class="section-card-head">
     <div class="section-card-title">
       {% set icon = s.get('icon') or 'file' %}

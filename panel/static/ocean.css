@@ -378,6 +378,48 @@ input, textarea { font-family: inherit; font-size: inherit; }
   font-size: 11px; color: var(--text-muted); font-family: var(--font-mono);
 }
 
+/* ────── modal editor ────── */
+.modal-overlay {
+  position: fixed; inset: 0;
+  background: rgba(11, 20, 38, 0.85);
+  backdrop-filter: blur(6px);
+  z-index: 90;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+}
+.modal-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-active);
+  border-radius: 14px;
+  width: 100%; max-width: 920px;
+  max-height: calc(100vh - 80px);
+  display: flex; flex-direction: column;
+  box-shadow: var(--shadow-elev), var(--shadow-glow);
+}
+.modal-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.modal-title { margin: 0; font-size: 16px; font-weight: 600; }
+.modal-actions { display: flex; align-items: center; gap: 12px; }
+.editor-textarea {
+  flex: 1;
+  width: 100%;
+  border: none;
+  outline: none;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  padding: 20px 24px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.6;
+  resize: none;
+  min-height: 480px;
+  border-radius: 0 0 14px 14px;
+}
+.editor-textarea:focus { outline: 1px solid var(--accent); outline-offset: -1px; }
+
 .tabs {
   display: flex; gap: 6px;
   border-bottom: 1px solid var(--border-subtle);

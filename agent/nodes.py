@@ -60,10 +60,17 @@ def get_tenant_resolver() -> TenantResolver:
     return _tenant
 
 
-def _make_llm(temperature: float = 0.7, max_tokens: int = 1000) -> ChatOpenAI:
-    """Constrói o cliente LLM. Aponta pra OpenRouter por padrão (mesma escolha do bot antigo)."""
+def _make_llm(
+    temperature: float = 0.7,
+    max_tokens: int = 1000,
+    model_override: str | None = None,
+) -> ChatOpenAI:
+    """
+    Constrói o cliente LLM. model_override > AI_MODEL env > default.
+    Permite trocar de modelo por projeto via Supabase project_config sem redeploy.
+    """
     return ChatOpenAI(
-        model=os.getenv("AI_MODEL", "openai/gpt-4o-mini"),
+        model=model_override or os.getenv("AI_MODEL", "openai/gpt-4o-mini"),
         api_key=os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY") or "missing",
         base_url=os.getenv("AI_BASE_URL", "https://openrouter.ai/api/v1"),
         temperature=temperature,
@@ -75,19 +82,32 @@ def _make_llm(temperature: float = 0.7, max_tokens: int = 1000) -> ChatOpenAI:
     )
 
 
-def _make_llm_with_tools(temperature: float = 0.7, max_tokens: int = 1000) -> Any:
+def _make_llm_with_tools(
+    temperature: float = 0.7,
+    max_tokens: int = 1000,
+    model_override: str | None = None,
+) -> Any:
     """
     Variante do _make_llm que faz bind_tools(EVOLUTION_TOOLS) — IA pode chamar
     tools (react, mark_read) autonomamente.
 
     Opt-in: só usado quando ENABLE_TOOL_CALLS=1. Default = tags ([REACT:X]).
     """
-    base = _make_llm(temperature=temperature, max_tokens=max_tokens)
+    base = _make_llm(temperature=temperature, max_tokens=max_tokens, model_override=model_override)
     if not os.getenv("ENABLE_TOOL_CALLS"):
         return base
     # Lazy import pra evitar ciclo (evolution_tools → nodes.get_evolution).
     from agent.evolution_tools import EVOLUTION_TOOLS
     return base.bind_tools(EVOLUTION_TOOLS)
+
+
+def _llm_kwargs_from_state(state: SalesState, default_temp: float = 0.7, default_max: int = 600) -> dict[str, Any]:
+    """Lê overrides de state (preenchidos por load_system_prompt_node)."""
+    return {
+        "temperature": float(state.get("_ai_temperature") or default_temp),
+        "max_tokens": int(state.get("_ai_max_tokens") or default_max),
+        "model_override": state.get("_ai_model"),
+    }
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -370,7 +390,7 @@ async def respond_node(state: SalesState) -> dict[str, Any]:
     messages: list[Any] = [SystemMessage(content=system_prompt)]
     messages.extend(state.get("messages", []))
 
-    llm = _make_llm_with_tools(temperature=0.7, max_tokens=600)
+    llm = _make_llm_with_tools(**_llm_kwargs_from_state(state, default_temp=0.7, default_max=600))
     res = await llm.ainvoke(messages)
     raw = res.content or ""
 
@@ -420,7 +440,7 @@ async def close_sale_node(state: SalesState) -> dict[str, Any]:
     messages: list[Any] = [SystemMessage(content=system)]
     messages.extend(state.get("messages", []))
 
-    llm = _make_llm(temperature=0.5, max_tokens=400)
+    llm = _make_llm(**_llm_kwargs_from_state(state, default_temp=0.5, default_max=400))
     res = await llm.ainvoke(messages)
     parsed = parse_tags(res.content or "")
     flow_name, cleaned_text = parse_flow_tag(parsed.text)
@@ -577,7 +597,8 @@ async def _run_specialist(
     messages: list[Any] = [SystemMessage(content=system)]
     messages.extend(state.get("messages", []))
 
-    llm = _make_llm(temperature=temperature, max_tokens=max_tokens)
+    kwargs = _llm_kwargs_from_state(state, default_temp=temperature, default_max=max_tokens)
+    llm = _make_llm(**kwargs)
     res = await llm.ainvoke(messages)
     parsed = parse_tags(res.content or "")
     flow_name, cleaned_text = parse_flow_tag(parsed.text)
@@ -618,17 +639,37 @@ async def follow_up_node(state: SalesState) -> dict[str, Any]:
 
 async def load_system_prompt_node(state: SalesState) -> dict[str, Any]:
     """
-    Carrega o SALES_SYSTEM principal e injeta em state['system_prompt'].
-    Todos os nós (respond, close_sale, greeting, objection, follow_up) leem dali
-    como base — única fonte de verdade do prompt do bot.
+    Carrega config do projeto (Supabase project_config) via cache LRU TTL 60s.
 
-    Pluggable: futuro, busca system_prompt do Supabase project_config table
-    (multi-tenant: cada projeto tem seu prompt próprio). Por enquanto usa SALES_SYSTEM
-    constante.
+    Compõe system_prompt a partir das 5 seções editáveis (brain_sections) +
+    footer técnico (tags secretas, regras estritas). Fallback pra SALES_SYSTEM
+    hardcoded se Supabase indisponível ou seções todas vazias.
+
+    Também propaga ai_model/ai_temperature/ai_max_tokens override pro _make_llm.
     """
-    # TODO multi-tenant: SELECT system_prompt FROM project_config WHERE project_id = state.project_id
-    # Por agora: hardcoded SALES_SYSTEM. Plugar Supabase depois sem mudar grafo.
-    return {"system_prompt": SALES_SYSTEM}
+    from panel.cache import compose_system_prompt, get_project_config_cache
+
+    project_id = state.get("project_id") or os.getenv("DEFAULT_PROJECT_ID", "padrao")
+    cfg = await get_project_config_cache().get(project_id)
+
+    # Compõe prompt das seções; se nenhum conteúdo, fallback hardcoded.
+    composed = compose_system_prompt(cfg)
+    system_prompt = composed or SALES_SYSTEM
+
+    patch: dict[str, Any] = {"system_prompt": system_prompt}
+    if cfg.get("ai_model"):
+        patch["_ai_model"] = cfg["ai_model"]
+    if cfg.get("ai_temperature") is not None:
+        try:
+            patch["_ai_temperature"] = float(cfg["ai_temperature"])
+        except (TypeError, ValueError):
+            pass
+    if cfg.get("ai_max_tokens"):
+        try:
+            patch["_ai_max_tokens"] = int(cfg["ai_max_tokens"])
+        except (TypeError, ValueError):
+            pass
+    return patch
 
 
 # ────────────────────────────────────────────────────────────────────

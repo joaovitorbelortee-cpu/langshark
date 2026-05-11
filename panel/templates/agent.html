@@ -3,7 +3,7 @@
 {% block page_title %}Agente{% endblock %}
 
 {% block content %}
-<section class="page">
+<section class="page" x-data="agentPage()" data-project-id="{{ current_project.project_id if current_project else 'padrao' }}">
   <div class="page-head">
     <span class="page-eyebrow">CONFIGURAÇÃO</span>
     <h2 class="page-title-large">Cérebro do agente</h2>
@@ -13,7 +13,7 @@
   <div class="agent-meta">
     <div class="agent-meta-stats">
       {% set filled = sections.values()|selectattr('content')|list|length %}
-      <span class="meta-chip">📊 {{ filled }}/{{ sections|length }}</span>
+      <span class="meta-chip">📊 <span x-text="filled + '/' + total">{{ filled }}/{{ sections|length }}</span></span>
       {% if config.ai_model %}
       <span class="meta-chip">✨ {{ config.ai_model }}</span>
       {% endif %}
@@ -27,8 +27,11 @@
   <div class="agent-name-row">
     <label class="field-inline">
       <span class="field-label">👤 NOME DO AGENTE</span>
-      <input type="text" class="input" value="{{ config.agent_name or '' }}" maxlength="70"
-             placeholder="ex: João" disabled />
+      <input type="text" class="input"
+             value="{{ config.agent_name or '' }}"
+             maxlength="70"
+             placeholder="ex: João"
+             @change="saveAgentName($event.target.value)" />
       <span class="char-count">{{ (config.agent_name or '')|length }}/70</span>
     </label>
   </div>
@@ -51,8 +54,109 @@
     {% include "_section_card.html" %}
   </div>
 
-  <div class="page-foot-info">
-    <p>F3 ainda em construção: clique nos cards vai abrir o editor CodeMirror.</p>
+  <p class="page-foot-info" style="margin: 12px 0 0;">Clique em qualquer card pra editar. Ctrl/Cmd+S salva.</p>
+
+  <!-- ─── Modal editor ─── -->
+  <div class="modal-overlay" x-show="editing" x-transition.opacity @click.self="cancelEdit()" style="display:none;">
+    <div class="modal-card" @keydown.escape.window="cancelEdit()">
+      <header class="modal-head">
+        <h3 class="modal-title" x-text="editingTitle"></h3>
+        <div class="modal-actions">
+          <span class="char-count" x-text="charCount + '/7000'"></span>
+          <button class="btn btn-secondary" type="button" @click="cancelEdit()">Cancelar</button>
+          <button class="btn btn-primary" type="button" @click="saveSection()">Salvar (Ctrl+S)</button>
+        </div>
+      </header>
+      <textarea class="editor-textarea"
+                x-ref="textarea"
+                x-model="editingContent"
+                @input="charCount = $event.target.value.length"
+                @keydown.ctrl.s.prevent="saveSection()"
+                @keydown.meta.s.prevent="saveSection()"
+                placeholder="Escreva esta seção do prompt..."></textarea>
+    </div>
   </div>
 </section>
+
+<script>
+function agentPage() {
+  return {
+    projectId: document.querySelector('.page').dataset.projectId,
+    sections: {{ sections|tojson }},
+    total: {{ sections|length }},
+    get filled() {
+      return Object.values(this.sections).filter(s => (s.content || '').length > 0).length;
+    },
+    editing: false,
+    editingKey: '',
+    editingTitle: '',
+    editingContent: '',
+    charCount: 0,
+
+    openSection(key) {
+      const s = this.sections[key] || {};
+      this.editingKey = key;
+      this.editingTitle = s.title || key;
+      this.editingContent = s.content || '';
+      this.charCount = this.editingContent.length;
+      this.editing = true;
+      this.$nextTick(() => this.$refs.textarea && this.$refs.textarea.focus());
+    },
+
+    cancelEdit() { this.editing = false; },
+
+    async saveSection() {
+      try {
+        const r = await fetch(`/api/admin/projects/${this.projectId}/sections/${this.editingKey}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: this.editingContent }),
+        });
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          throw new Error(err.detail || r.statusText);
+        }
+        const data = await r.json();
+        this.sections[this.editingKey] = { ...this.sections[this.editingKey], content: this.editingContent };
+        this.editing = false;
+        showToast('Seção salva. Bot usa em < 60s.', 'success');
+        // Atualiza preview no card sem reload
+        const card = document.querySelector(`[data-section-key="${this.editingKey}"]`);
+        if (card) {
+          card.querySelector('.section-preview').textContent =
+            this.editingContent ? this.editingContent.slice(0, 160) + (this.editingContent.length > 160 ? '…' : '')
+                                : 'FAQ, detalhes de produto, políticas e informações livres.';
+          card.querySelector('.char-count').textContent = `${this.editingContent.length}/7000`;
+          const badge = card.querySelector('.section-badge');
+          if (this.editingContent) {
+            badge.classList.add('badge-filled'); badge.classList.remove('badge-empty');
+            badge.textContent = '● Preenchido';
+          } else {
+            badge.classList.add('badge-empty'); badge.classList.remove('badge-filled');
+            badge.textContent = '● Vazio';
+          }
+          const bar = card.querySelector('.section-progress .bar');
+          if (bar) bar.style.width = `${(this.editingContent.length / 7000 * 100).toFixed(1)}%`;
+        }
+      } catch (e) {
+        showToast('Falha: ' + e.message, 'error');
+      }
+    },
+
+    async saveAgentName(name) {
+      try {
+        const r = await fetch(`/api/admin/projects/${this.projectId}/config`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ agent_name: name }),
+        });
+        if (!r.ok) throw new Error('falha');
+        showToast('Nome atualizado', 'success');
+      } catch (e) {
+        showToast('Falha ao salvar nome', 'error');
+      }
+    },
+  };
+}
+</script>
 {% endblock %}
