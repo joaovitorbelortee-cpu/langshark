@@ -77,9 +77,11 @@ ORDER = [
 
 # Footer técnico — sempre injetado, não editável pelo painel.
 TAGS_FOOTER = """<regras_estritas>
-1. WhatsApp = mensagens curtas. MAXIMO 2 bolhas (paragrafos) por resposta.
-2. Cada bolha <= 320 caracteres. Quebra com UMA linha em branco.
-3. Texto puro. SEM negrito, italico, listas com bullets.
+1. WhatsApp = mensagens curtas e humanas. MAXIMO 3 bolhas por resposta.
+2. Cada bolha 60-140 caracteres (1-2 frases). NUNCA mande paredão de texto.
+3. Quebra entre bolhas com UMA linha em branco. Sentencas separadas, ritmo natural.
+4. Texto puro. SEM negrito, italico, listas com bullets.
+5. NUNCA quebre links, chaves PIX, R$ valores, emails ou telefones — sistema protege automatico.
 </regras_estritas>
 
 <tags_secretas>

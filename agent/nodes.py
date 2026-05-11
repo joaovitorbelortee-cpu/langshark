@@ -410,7 +410,7 @@ async def respond_node(state: SalesState) -> dict[str, Any]:
     parsed = parse_tags(raw)
     # Remove a tag [FLOW: nome] do texto antes de chunkar.
     flow_name, cleaned_text = parse_flow_tag(parsed.text)
-    chunks = chunk_for_whatsapp(cleaned_text, max_bubbles=2, max_chars=320)
+    chunks = chunk_for_whatsapp(cleaned_text, max_bubbles=3, max_chars=140)
 
     patch: dict[str, Any] = {
         "reply": cleaned_text,
@@ -457,7 +457,7 @@ async def close_sale_node(state: SalesState) -> dict[str, Any]:
     res = await llm.ainvoke(messages)
     parsed = parse_tags(res.content or "")
     flow_name, cleaned_text = parse_flow_tag(parsed.text)
-    chunks = chunk_for_whatsapp(cleaned_text, max_bubbles=2, max_chars=320)
+    chunks = chunk_for_whatsapp(cleaned_text, max_bubbles=3, max_chars=140)
 
     patch: dict[str, Any] = {
         "reply": cleaned_text,
@@ -615,7 +615,7 @@ async def _run_specialist(
     res = await llm.ainvoke(messages)
     parsed = parse_tags(res.content or "")
     flow_name, cleaned_text = parse_flow_tag(parsed.text)
-    chunks = chunk_for_whatsapp(cleaned_text, max_bubbles=2, max_chars=320)
+    chunks = chunk_for_whatsapp(cleaned_text, max_bubbles=3, max_chars=140)
 
     patch: dict[str, Any] = {
         "reply": cleaned_text,

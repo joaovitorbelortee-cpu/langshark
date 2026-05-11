@@ -66,51 +66,182 @@ def parse_tags(raw: str) -> ParsedTags:
 
 
 # ────────────────────────────────────────────────────────────────────
-# Chunking em bolhas (replica humanization.chunkTextForWhatsApp)
+# Chunking humanizado em bolhas
 # ────────────────────────────────────────────────────────────────────
+
+# Padrões protegidos: NUNCA quebrar no meio destes (links, chaves PIX, etc).
+# Ordem importa — combinações mais específicas primeiro.
+_PROTECTED_PATTERNS = [
+    r"https?://\S+",                                     # URLs http/https
+    r"\bwww\.\S+",                                       # URLs bare www
+    r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+",                     # emails
+    r"\b(?:\+?55\s?)?\(?\d{2,3}\)?\s?\d{4,5}-?\d{4}\b",  # telefones BR
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b",  # UUID (pix)
+    r"\b[A-Za-z0-9_-]{32,}\b",                           # chaves PIX random longas
+    # R$ amounts incluindo ranges/listas — "R$40", "R$ 40,00", "R$40 a R$60", "R$40/mes"
+    r"R\$\s*\d+(?:[.,]\d{1,3})*(?:\s*(?:a|e|–|-|/|por)\s*R\$?\s*\d+(?:[.,]\d{1,3})*)*",
+    r"`[^`\n]+`",                                        # inline code
+    r"```[\s\S]+?```",                                   # code blocks
+]
+
+_PROTECT_TOKEN = "\x00PROT{}\x00"
+_PROTECT_RE = re.compile("|".join(f"(?:{p})" for p in _PROTECTED_PATTERNS))
+
+
+def _protect_regions(text: str) -> tuple[str, list[str]]:
+    """Substitui regiões protegidas por placeholders. Retorna (texto_seguro, lista_originais)."""
+    matches: list[str] = []
+
+    def _capture(m: re.Match) -> str:
+        idx = len(matches)
+        matches.append(m.group(0))
+        return _PROTECT_TOKEN.format(idx)
+
+    safe = _PROTECT_RE.sub(_capture, text)
+    return safe, matches
+
+
+def _restore_regions(text: str, matches: list[str]) -> str:
+    """Substitui placeholders pelos originais."""
+    for i, original in enumerate(matches):
+        text = text.replace(_PROTECT_TOKEN.format(i), original)
+    return text
+
+
+# Conectivos brasileiros que marcam pausas naturais (split point opcional).
+_CONNECTIVES = (
+    "mas",
+    "porém",
+    "então",
+    "olha",
+    "tipo",
+    "ou seja",
+    "tipo assim",
+    "vamos lá",
+    "se liga",
+    "agora",
+    "aí",
+)
+_CONNECTIVE_RE = re.compile(
+    r"\s+(?=(?:" + "|".join(re.escape(c) for c in _CONNECTIVES) + r")\b)",
+    re.IGNORECASE,
+)
+_COMMA_BREAK_RE = re.compile(r"(?<=[,;:])\s+(?=[A-Za-zÀ-ÿ])")
+
+
+def _split_smart(text: str, max_chars: int) -> list[str]:
+    """
+    Quebra texto longo em pedaços <= max_chars priorizando:
+    1. Pontuação forte [.!?]
+    2. Conectivos ("mas", "então", "porém"...)
+    3. Vírgulas/dois-pontos
+    4. Espaços (último recurso, palavra inteira)
+    """
+    if len(text) <= max_chars:
+        return [text]
+
+    # Sentenças
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    chunks: list[str] = []
+    buf = ""
+    for s in sentences:
+        if not buf:
+            buf = s
+        elif len(buf) + 1 + len(s) <= max_chars:
+            buf = f"{buf} {s}"
+        else:
+            chunks.append(buf)
+            buf = s
+    if buf:
+        chunks.append(buf)
+
+    # Se alguma sentença sozinha excede max_chars, quebra por conectivos + vírgulas.
+    refined: list[str] = []
+    for c in chunks:
+        if len(c) <= max_chars:
+            refined.append(c)
+            continue
+        pieces = _CONNECTIVE_RE.split(c)
+        sub: list[str] = []
+        for piece in pieces:
+            if len(piece) <= max_chars:
+                sub.append(piece)
+            else:
+                sub.extend(p for p in _COMMA_BREAK_RE.split(piece) if p)
+        # Recombina sub-pedaços respeitando max_chars
+        buf2 = ""
+        for piece in sub:
+            piece = piece.strip()
+            if not piece:
+                continue
+            if not buf2:
+                buf2 = piece
+            elif len(buf2) + 1 + len(piece) <= max_chars:
+                buf2 = f"{buf2} {piece}"
+            else:
+                refined.append(buf2)
+                buf2 = piece
+        if buf2:
+            refined.append(buf2)
+    return refined
+
 
 def chunk_for_whatsapp(
     text: str,
-    max_bubbles: int = 2,
-    max_chars: int = 320,
+    max_bubbles: int = 3,
+    max_chars: int = 140,
+    min_chars: int = 25,
 ) -> list[str]:
     """
-    Quebra o texto em bolhas pequenas (regra: máx 2 bolhas, ~320 chars cada).
+    Quebra texto em bolhas humanizadas pro WhatsApp.
 
-    1. Split em parágrafos (linhas em branco).
-    2. Se um parágrafo passar de max_chars, split em sentenças.
-    3. Cap em max_bubbles — sobra concatenado na última bolha.
+    Estratégia:
+      1. Protege URLs, chaves PIX, telefones, R$ amounts, emails (nunca quebra dentro)
+      2. Split em parágrafos (\\n\\n)
+      3. Cada parágrafo grande → split por sentença → por conectivos → por vírgulas
+      4. Junta bolhas minúsculas (<min_chars) com vizinha
+      5. Limita a max_bubbles (sobra concatenada na última)
+
+    Defaults: 3 bolhas × 140 chars — sensação humana, sem fragmentar demais.
     """
     if not text:
         return []
+    text = text.strip()
+    if not text:
+        return []
 
-    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    # 1. Protege regiões intocáveis (URLs/PIX/R$/etc)
+    safe, matches = _protect_regions(text)
+
+    # 2. Split em parágrafos
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", safe) if p.strip()]
+
+    # 3. Cada parágrafo → smart split
     bubbles: list[str] = []
-
     for p in paragraphs:
-        if len(p) <= max_chars:
-            bubbles.append(p)
+        bubbles.extend(_split_smart(p, max_chars))
+
+    # 4. Merge bolhas curtas demais (< min_chars) com vizinha
+    merged: list[str] = []
+    for b in bubbles:
+        b = b.strip()
+        if not b:
             continue
-        # Split em sentenças preservando pontuação.
-        sentences = re.split(r"(?<=[.!?])\s+", p)
-        buf = ""
-        for s in sentences:
-            if not buf:
-                buf = s
-            elif len(buf) + 1 + len(s) <= max_chars:
-                buf = f"{buf} {s}"
-            else:
-                bubbles.append(buf)
-                buf = s
-        if buf:
-            bubbles.append(buf)
+        if merged and (len(b) < min_chars or len(merged[-1]) < min_chars):
+            candidate = f"{merged[-1]} {b}"
+            if len(candidate) <= int(max_chars * 1.25):
+                merged[-1] = candidate
+                continue
+        merged.append(b)
 
-    if len(bubbles) > max_bubbles:
-        head = bubbles[: max_bubbles - 1]
-        tail = " ".join(bubbles[max_bubbles - 1 :])
-        bubbles = head + [tail]
+    # 5. Cap em max_bubbles — sobra concatenada na última
+    if len(merged) > max_bubbles:
+        head = merged[: max_bubbles - 1]
+        tail = " ".join(merged[max_bubbles - 1 :])
+        merged = head + [tail]
 
-    return bubbles
+    # 6. Restaura regiões protegidas
+    return [_restore_regions(b, matches).strip() for b in merged if b.strip()]
 
 
 # ────────────────────────────────────────────────────────────────────
