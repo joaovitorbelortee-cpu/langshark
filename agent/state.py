@@ -92,3 +92,6 @@ class SalesState(TypedDict):
     supervisor_review: NotRequired[dict[str, Any]]    # {approved, reason, feedback, severity}
     supervisor_attempts: NotRequired[int]             # nº de retries já tentados
     supervisor_feedback: NotRequired[str]             # feedback do supervisor pra retry do especialista
+
+    # Debug — quando True, send_node não envia pra Evolution (modo simulate)
+    _debug_no_send: NotRequired[bool]

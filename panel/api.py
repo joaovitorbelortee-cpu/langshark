@@ -600,6 +600,180 @@ async def diagnose_instance(
 
 
 # ────────────────────────────────────────────────────────────────────
+# Debug: simular mensagem (testar graph sem WhatsApp)
+# ────────────────────────────────────────────────────────────────────
+
+@admin_router.post("/debug/simulate")
+async def simulate_message(
+    user: Annotated[dict[str, Any], Depends(require_admin)],
+    body: dict = Body(...),
+) -> dict[str, Any]:
+    """
+    Dispara o graph LangGraph com payload simulado SEM passar pela queue/Evolution.
+    Use pra testar prompts/regras enquanto a instance WhatsApp tá offline.
+
+    Body: {"project_id": "padrao", "phone": "5511...", "message": "oi"}
+
+    Retorna:
+      - reply (texto que bot mandaria)
+      - chunks (mensagens fragmentadas)
+      - intent, has_converted, schedule_minutes (tags parsed)
+      - final_state (state completo pós-graph)
+    """
+    project_id = (body.get("project_id") or "padrao").strip()
+    if not _user_can_access_project(user, project_id):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    phone = (body.get("phone") or "").strip()
+    message = (body.get("message") or "").strip()
+    if not phone or not message:
+        raise HTTPException(status_code=400, detail="phone e message obrigatórios")
+
+    import main as _main_mod  # import lazy pra evitar ciclo
+    if _main_mod._graph_app is None:
+        raise HTTPException(status_code=503, detail="Graph não inicializado")
+
+    instance = (body.get("instance_name") or "_debug_").strip()
+    initial_state = {
+        "project_id": project_id,
+        "instance_name": instance,
+        "phone": phone,
+        "push_name": body.get("push_name") or "Debug User",
+        "user_message": message,
+        "media_mime": None,
+        "media_base64": None,
+        "message_id": f"debug-{int(_time.time() * 1000)}",
+        "messages": [],
+    }
+    from agent.checkpointer import thread_id_for
+    thread_id = thread_id_for(project_id, instance, phone)
+    cfg = {"configurable": {"thread_id": thread_id}}
+
+    try:
+        # Roda o graph todo (mas send_node é no-op pra _debug_ instance? Não — vai
+        # tentar enviar via Evolution. Use instance real OU desliga via flag.)
+        # Pra evitar envio: setamos flag no state que send_node respeita.
+        initial_state["_debug_no_send"] = True  # send_node ignora
+        await _main_mod._graph_app.ainvoke(initial_state, config=cfg)
+        snap = await _main_mod._graph_app.aget_state(cfg)
+        final_state = dict(snap.values or {}) if snap else {}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Graph erro: {exc}"[:300])
+
+    # Sanitiza state pra serializar (remove BaseMessage objects)
+    state_clean: dict[str, Any] = {}
+    for k, v in final_state.items():
+        if k == "messages":
+            state_clean["messages_count"] = len(v) if isinstance(v, list) else 0
+            state_clean["last_messages"] = [
+                {
+                    "type": getattr(m, "type", "?"),
+                    "content": str(getattr(m, "content", ""))[:200],
+                }
+                for m in (v or [])[-4:]
+            ]
+        else:
+            try:
+                import json as _json
+                _json.dumps(v)
+                state_clean[k] = v
+            except (TypeError, ValueError):
+                state_clean[k] = str(v)[:200]
+
+    await _audit(user, "debug.simulate", "graph", phone, message=message[:80])
+    return {
+        "ok": True,
+        "thread_id": thread_id,
+        "reply": final_state.get("reply") or "",
+        "chunks": final_state.get("chunks") or [],
+        "intent": final_state.get("intent"),
+        "has_converted": final_state.get("has_converted"),
+        "schedule_minutes": final_state.get("schedule_minutes"),
+        "supervisor_review": final_state.get("supervisor_review"),
+        "lead_facts": final_state.get("lead_facts"),
+        "state": state_clean,
+    }
+
+
+# ────────────────────────────────────────────────────────────────────
+# Memory viewers — debug Episodic + Procedural
+# ────────────────────────────────────────────────────────────────────
+
+@admin_router.get("/memory/wins")
+async def list_wins(
+    user: Annotated[dict[str, Any], Depends(require_admin)],
+    project_id: str = "padrao",
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Lista episodic wins (conversas que converteram) gravadas no Store."""
+    if not _user_can_access_project(user, project_id):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    from agent.store import get_shared_store
+    store = get_shared_store()
+    if store is None:
+        return {"ok": False, "error": "Store não inicializado (REDIS_URL?)", "wins": []}
+    try:
+        results = await store.asearch((project_id, "wins"), limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)[:200], "wins": []}
+    wins = []
+    for item in results:
+        wins.append({
+            "key": getattr(item, "key", None),
+            "value": getattr(item, "value", None),
+            "created_at": str(getattr(item, "created_at", "")),
+        })
+    return {"ok": True, "count": len(wins), "wins": wins}
+
+
+@admin_router.get("/memory/lessons")
+async def list_lessons(
+    user: Annotated[dict[str, Any], Depends(require_admin)],
+    project_id: str = "padrao",
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Lista procedural lessons (erros do supervisor) gravadas no Store."""
+    if not _user_can_access_project(user, project_id):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    from agent.store import get_shared_store
+    store = get_shared_store()
+    if store is None:
+        return {"ok": False, "error": "Store não inicializado", "lessons": []}
+    try:
+        results = await store.asearch((project_id, "lessons"), limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)[:200], "lessons": []}
+    lessons = []
+    for item in results:
+        lessons.append({
+            "key": getattr(item, "key", None),
+            "value": getattr(item, "value", None),
+            "created_at": str(getattr(item, "created_at", "")),
+        })
+    return {"ok": True, "count": len(lessons), "lessons": lessons}
+
+
+@admin_router.delete("/memory/lessons/{key}")
+async def delete_lesson(
+    key: str,
+    user: Annotated[dict[str, Any], Depends(require_admin)],
+    project_id: str = "padrao",
+) -> dict[str, Any]:
+    """Remove lesson errada/obsoleta do Store (cleanup manual)."""
+    if not _user_can_access_project(user, project_id):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    from agent.store import get_shared_store
+    store = get_shared_store()
+    if store is None:
+        raise HTTPException(status_code=503, detail="Store não inicializado")
+    try:
+        await store.adelete((project_id, "lessons"), key)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)[:200])
+    await _audit(user, "memory.delete_lesson", "store", key)
+    return {"ok": True, "deleted": key}
+
+
+# ────────────────────────────────────────────────────────────────────
 # Flows CRUD (F4)
 # ────────────────────────────────────────────────────────────────────
 

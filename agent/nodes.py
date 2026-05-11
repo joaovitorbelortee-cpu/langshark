@@ -287,6 +287,7 @@ def _build_system_prompt(
     lead_facts: dict[str, Any] | None = None,
     supervisor_feedback: str | None = None,
     episodic_examples: str = "",
+    procedural_lessons: str = "",
 ) -> str:
     """
     Compõe system prompt = base + foco + lead_facts (CRÍTICO anti-amnésia) +
@@ -321,6 +322,14 @@ def _build_system_prompt(
             "TOM e ESTRATÉGIA — NÃO copie literalmente.\n\n"
             f"{episodic_examples}\n"
             "</conversas_que_converteram>"
+        )
+
+    if procedural_lessons:
+        prompt += (
+            "\n\n<lições_aprendidas>\n"
+            "Erros recentes que o supervisor reprovou. EVITE repetir essas falhas:\n\n"
+            f"{procedural_lessons}\n"
+            "</lições_aprendidas>"
         )
 
     # Supervisor feedback vai PRÓXIMO do final pra ter mais peso no LLM
@@ -392,6 +401,93 @@ async def _fetch_episodic_examples(
         return "\n\n".join(parts)
     except Exception as exc:  # noqa: BLE001
         log.warning("[episodic] fetch falhou: %s", exc)
+        return ""
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Procedural Memory (LangGraph pattern) — lessons aprendidas do supervisor
+# Quando supervisor rejeita uma resposta, grava lesson no Store. Especialistas
+# leem em turnos futuros pra evitar mesmo erro. Self-improving loop.
+# ──────────────────────────────────────────────────────────────────────
+
+async def _record_supervisor_lesson(
+    state: SalesState,
+    review: dict[str, Any],
+) -> None:
+    """Salva no Store o motivo da rejeição + snippet da resposta ruim."""
+    try:
+        from agent.store import get_shared_store
+        store = get_shared_store()
+        if store is None:
+            return
+        project_id = state.get("project_id", "") or "padrao"
+        proposed = (state.get("reply") or "")[:200]
+        reason = (review.get("reason") or "")[:120]
+        feedback = (review.get("feedback") or "")[:300]
+        severity = review.get("severity") or "warning"
+        # Skip lessons triviais (severity ok ou sem feedback útil)
+        if severity == "ok" or (not reason and not feedback):
+            return
+        import time as _t
+        lesson = {
+            "ts": _t.time(),
+            "severity": severity,
+            "reason": reason,
+            "feedback": feedback,
+            "bad_reply_sample": proposed,
+            "lead_estagio": (state.get("lead_facts") or {}).get("estagio"),
+            "lead_plataforma": (state.get("lead_facts") or {}).get("plataforma"),
+        }
+        key = f"lesson_{int(_t.time() * 1000)}"
+        await store.aput((project_id, "lessons"), key, lesson)
+        log.info("[procedural] lesson registrada %s severity=%s reason=%s",
+                 project_id, severity, reason[:60])
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[procedural] record erro: %s", exc)
+
+
+async def _fetch_procedural_lessons(
+    project_id: str,
+    max_lessons: int = 3,
+) -> str:
+    """
+    Lê últimas N lessons do Store + renderiza como bloco pro system prompt.
+    Especialistas leem antes de gerar resposta pra evitar repetir erros.
+    """
+    try:
+        from agent.store import get_shared_store
+        store = get_shared_store()
+        if store is None:
+            return ""
+        # Sem filter — pega geral. Vector index futuro permite filtrar por
+        # situação similar ao estado atual.
+        results = await store.asearch(
+            (project_id, "lessons"),
+            limit=max_lessons * 3,  # mais buffer pra filtrar critical primeiro
+        )
+        if not results:
+            return ""
+        # Priorize critical > warning > resto
+        sorted_results = sorted(
+            results,
+            key=lambda it: (
+                0 if (getattr(it, "value", None) or {}).get("severity") == "critical" else 1,
+                -((getattr(it, "value", None) or {}).get("ts", 0)),
+            ),
+        )
+        lessons_to_show = sorted_results[:max_lessons]
+        lines = []
+        for idx, item in enumerate(lessons_to_show, 1):
+            v = getattr(item, "value", None) or {}
+            sev = v.get("severity", "?").upper()
+            reason = v.get("reason", "")
+            feedback = v.get("feedback", "")
+            lines.append(f"{idx}. [{sev}] {reason}")
+            if feedback:
+                lines.append(f"   → Como evitar: {feedback}")
+        return "\n".join(lines)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[procedural] fetch falhou: %s", exc)
         return ""
 
 
@@ -616,6 +712,8 @@ async def respond_node(state: SalesState) -> dict[str, Any]:
     # Episodic memory: busca exemplos de conversas que converteram com leads
     # similares (mesma plataforma). Padrão LangGraph oficial.
     episodic = await _fetch_episodic_examples(project_id, state.get("lead_facts"))
+    # Procedural lessons — erros recentes pra evitar
+    lessons = await _fetch_procedural_lessons(project_id)
     system_prompt = _build_system_prompt(
         catalog_block,
         state.get("summary", ""),
@@ -624,6 +722,7 @@ async def respond_node(state: SalesState) -> dict[str, Any]:
         lead_facts=state.get("lead_facts"),
         supervisor_feedback=state.get("supervisor_feedback"),
         episodic_examples=episodic,
+        procedural_lessons=lessons,
     )
 
     messages: list[Any] = [SystemMessage(content=system_prompt)]
@@ -685,6 +784,8 @@ async def close_sale_node(state: SalesState) -> dict[str, Any]:
     catalog_block = get_rag().format_context(state.get("catalog_hits", []) or [])
     # Episodic recall — exemplos de fechamentos passados com leads similares
     episodic = await _fetch_episodic_examples(state["project_id"], state.get("lead_facts"))
+    # Procedural lessons — erros recentes pra evitar
+    lessons = await _fetch_procedural_lessons(state["project_id"])
     system = _build_system_prompt(
         catalog_block,
         state.get("summary", ""),
@@ -694,6 +795,7 @@ async def close_sale_node(state: SalesState) -> dict[str, Any]:
         lead_facts=state.get("lead_facts"),
         supervisor_feedback=state.get("supervisor_feedback"),
         episodic_examples=episodic,
+        procedural_lessons=lessons,
     )
 
     messages: list[Any] = [SystemMessage(content=system)]
@@ -923,6 +1025,8 @@ async def _run_specialist(
     Especialista NUNCA reescreve as regras gerais — só adiciona foco do turno.
     """
     catalog_block = get_rag().format_context(state.get("catalog_hits", []) or [])
+    # Procedural lessons — erros recentes pra evitar
+    lessons = await _fetch_procedural_lessons(state["project_id"])
     system = _build_system_prompt(
         catalog_block,
         state.get("summary", ""),
@@ -931,6 +1035,7 @@ async def _run_specialist(
         specialist_focus=specialist_focus,
         lead_facts=state.get("lead_facts"),
         supervisor_feedback=state.get("supervisor_feedback"),
+        procedural_lessons=lessons,
     )
 
     messages: list[Any] = [SystemMessage(content=system)]
@@ -1219,6 +1324,10 @@ async def supervisor_node(state: SalesState) -> dict[str, Any]:
         # Limpa chunks/reply pra forçar especialista regerar
         patch["reply"] = ""
         patch["chunks"] = []
+
+        # Procedural Memory (LangGraph pattern): registra "lesson" do erro
+        # rejeitado pra que especialistas leiam em turnos FUTUROS e evitem.
+        await _record_supervisor_lesson(state, review)
     else:
         # Approved OU esgotou retries — segue pra strategist.
         # CRÍTICO: limpa supervisor_feedback/attempts pra não vazar pro próximo
@@ -1230,6 +1339,8 @@ async def supervisor_node(state: SalesState) -> dict[str, Any]:
                 state.get("instance_name", "?"), state.get("phone", "?"),
                 SUPERVISOR_MAX_RETRIES, review["reason"],
             )
+            # Esgotou retries = erro grave, registra lesson sempre
+            await _record_supervisor_lesson(state, review)
         patch["supervisor_feedback"] = ""
         patch["supervisor_attempts"] = 0
 
@@ -1393,7 +1504,13 @@ async def send_node(state: SalesState) -> dict[str, Any]:
     Pula se:
       - flow_dispatched=True (flow_executor_node já enviou tudo)
       - chunks vazio
+      - state["_debug_no_send"]=True (modo simulate via admin)
     """
+    # Debug mode — pula envio real (admin /debug/simulate usa)
+    if state.get("_debug_no_send"):
+        log.info("[send] debug_no_send=true — pula Evolution")
+        return {"sent": False, "sent_count": 0}
+
     import asyncio
 
     from agent.tools import jitter_between_bubbles_ms, typing_delay_ms
