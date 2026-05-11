@@ -398,6 +398,14 @@ async def webhook(request: Request) -> dict:
     except Exception:  # noqa: BLE001
         pass
 
+    # Empilha messageId no buffer de unread — bot vai marcar TODAS antes de responder
+    # (cliente manda rajada rápida → todas viram ✓✓ azul juntas, não só a última)
+    if message_id:
+        try:
+            await redis.push_unread(instance, phone, message_id)
+        except Exception:  # noqa: BLE001
+            pass
+
     # Empilha na FIFO global — worker drena
     queue_payload = {
         "kind": "inbound",

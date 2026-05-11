@@ -1156,10 +1156,20 @@ async def send_node(state: SalesState) -> dict[str, Any]:
     # → faz aparecer ✓✓ azul (2 tiques azuis) no WhatsApp do cliente
     # → sinaliza que bot recebeu + leu, antes do "digitando..."
     # → roda mesmo em caminhos silenciosos (chunks vazios, flow_dispatched)
-    if message_id:
-        remote_jid = f"{phone}@s.whatsapp.net"
+    # Marca TODAS as msgs unread do buffer (rajada do cliente → ✓✓ azul em todas).
+    # Drena Redis buffer + inclui current message_id pra cobertura completa.
+    remote_jid = f"{phone}@s.whatsapp.net"
+    unread_ids: list[str] = []
+    try:
+        unread_ids = await redis.drain_unread(instance, phone)
+    except Exception:  # noqa: BLE001
+        unread_ids = []
+    if message_id and message_id not in unread_ids:
+        unread_ids.append(message_id)
+    if unread_ids:
         try:
-            await evo.mark_read(instance, remote_jid, message_id)
+            await evo.mark_messages_read(instance, remote_jid, unread_ids)
+            log.info("[send] mark_read %s/%s ids=%d", instance, phone, len(unread_ids))
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001

@@ -355,6 +355,26 @@ class EvolutionClient:
         body = {"readMessages": [{"remoteJid": remote_jid, "id": message_id, "fromMe": False}]}
         return await self._post(f"/chat/markMessageAsRead/{instance}", body)
 
+    async def mark_messages_read(
+        self,
+        instance: str,
+        remote_jid: str,
+        message_ids: list[str],
+    ) -> dict:
+        """Marca MÚLTIPLAS msgs como lidas numa única call (anti rajada unread)."""
+        if not message_ids:
+            return {"success": True, "skipped": "no_ids"}
+        body = {
+            "readMessages": [
+                {"remoteJid": remote_jid, "id": mid, "fromMe": False}
+                for mid in message_ids
+                if mid
+            ],
+        }
+        if not body["readMessages"]:
+            return {"success": True, "skipped": "empty"}
+        return await self._post(f"/chat/markMessageAsRead/{instance}", body)
+
     async def set_settings(self, instance: str, **settings: Any) -> dict:
         """
         Atualiza settings da instância via /settings/set/{instance}.

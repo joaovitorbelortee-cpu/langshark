@@ -444,6 +444,33 @@ class RedisStore:
         await self._cmd("SET", key, json.dumps(facts), "EX", str(self._LEAD_FACTS_TTL))
 
     # ────────────────────────────────────────────────────────────
+    # Unread buffer — msgs do cliente ainda não marcadas como lidas
+    # Anti-rajada: cliente manda 3 msgs rápidas → bot marca TODAS de uma vez.
+    # ────────────────────────────────────────────────────────────
+
+    _UNREAD_TTL = 60 * 60 * 24  # 24h — após isso, msg considerada já lida
+
+    def _unread_key(self, instance: str, phone: str) -> str:
+        return f"unread:{instance}:{phone}"
+
+    async def push_unread(self, instance: str, phone: str, message_id: str) -> None:
+        """Empilha messageId no buffer de unread (LPUSH + EXPIRE)."""
+        if not message_id:
+            return
+        key = self._unread_key(instance, phone)
+        await self._cmd("LPUSH", key, message_id)
+        await self._cmd("EXPIRE", key, str(self._UNREAD_TTL))
+
+    async def drain_unread(self, instance: str, phone: str) -> list[str]:
+        """Pega TODOS unread ids + apaga buffer. Single op pra usar antes do mark_read."""
+        key = self._unread_key(instance, phone)
+        raw = await self._cmd("LRANGE", key, "0", "-1")
+        await self._cmd("DEL", key)
+        if isinstance(raw, list):
+            return [x for x in raw if isinstance(x, str) and x]
+        return []
+
+    # ────────────────────────────────────────────────────────────
     # Lead status registry — alimentado pelo strategist, lido pelo painel
     # ────────────────────────────────────────────────────────────
 
