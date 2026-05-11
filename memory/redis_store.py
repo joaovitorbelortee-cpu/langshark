@@ -123,6 +123,36 @@ class RedisStore:
         if cmd == "DEL":
             return int(self._fallback.pop(parts[1], None) is not None)
 
+        # ── LISTAS: LPUSH / RPUSH / RPOP / LPOP / LLEN ──
+        # Armazena list como (list_obj, None) — segundo elemento (exp) ignorado.
+        if cmd in ("LPUSH", "RPUSH"):
+            key = parts[1]
+            entry = self._fallback.get(key)
+            if entry and isinstance(entry[0], list):
+                lst = entry[0]
+            else:
+                lst = []
+                self._fallback[key] = (lst, None)
+            for val in parts[2:]:
+                if cmd == "LPUSH":
+                    lst.insert(0, val)
+                else:
+                    lst.append(val)
+            return len(lst)
+
+        if cmd in ("RPOP", "LPOP"):
+            key = parts[1]
+            entry = self._fallback.get(key)
+            if not entry or not isinstance(entry[0], list) or not entry[0]:
+                return None
+            return entry[0].pop() if cmd == "RPOP" else entry[0].pop(0)
+
+        if cmd == "LLEN":
+            entry = self._fallback.get(parts[1])
+            if not entry or not isinstance(entry[0], list):
+                return 0
+            return len(entry[0])
+
         return None
 
     # ────────────────────────────────────────────────────────────
@@ -221,3 +251,44 @@ class RedisStore:
 
     async def release_lock(self, instance: str, phone: str) -> None:
         await self._cmd("DEL", f"lock:{instance}:{phone}")
+
+    # ────────────────────────────────────────────────────────────
+    # FIFO queue global — anti-spam WhatsApp
+    # Garante 1 mensagem processada por vez (todos leads, todas instances).
+    # Sem isso, paralelismo dispara N envios simultâneos → ban WhatsApp.
+    # ────────────────────────────────────────────────────────────
+
+    _QUEUE_KEY = "queue:messages"
+
+    async def enqueue_message(self, payload: dict[str, Any]) -> int:
+        """LPUSH na queue global. Retorna tamanho atual."""
+        raw = json.dumps(payload)
+        result = await self._cmd("LPUSH", self._QUEUE_KEY, raw)
+        try:
+            return int(result) if result is not None else 0
+        except (TypeError, ValueError):
+            return 0
+
+    async def dequeue_message(self) -> dict[str, Any] | None:
+        """RPOP FIFO. Retorna dict ou None se queue vazia."""
+        raw = await self._cmd("RPOP", self._QUEUE_KEY)
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else None
+            return data if isinstance(data, dict) else None
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+    async def queue_length(self) -> int:
+        """LLEN — tamanho atual da queue."""
+        try:
+            res = await self._cmd("LLEN", self._QUEUE_KEY)
+            return int(res or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    async def requeue_head(self, payload: dict[str, Any]) -> None:
+        """RPUSH — coloca de volta NO FIM (próximo a sair). Usado em lock_held."""
+        raw = json.dumps(payload)
+        await self._cmd("RPUSH", self._QUEUE_KEY, raw)

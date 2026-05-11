@@ -12,10 +12,12 @@ TUDO o que é decisão, RAG, envio, persistência → vive dentro do grafo.
 """
 from __future__ import annotations
 
+import asyncio
 import hmac
 import logging
 import os
 import re
+import time
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -42,18 +44,40 @@ log = logging.getLogger("bot-vendas")
 
 _checkpointer_provider: CheckpointerProvider | None = None
 _graph_app: Any | None = None
+_worker_task: asyncio.Task[Any] | None = None
+_worker_stop_evt: asyncio.Event = asyncio.Event()
+
+# Tempo máximo (segundos) que uma mensagem pode ficar na fila antes de descartar.
+# Cliente espera 5min sem resposta = melhor descartar que mandar resposta estranha.
+QUEUE_MAX_STALE_SECONDS = int(os.getenv("QUEUE_MAX_STALE_SECONDS", "300"))
+# Intervalo de poll quando queue vazia (Upstash REST não suporta BRPOP).
+QUEUE_POLL_INTERVAL_S = float(os.getenv("QUEUE_POLL_INTERVAL_S", "0.5"))
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global _checkpointer_provider, _graph_app
+    global _checkpointer_provider, _graph_app, _worker_task
     _checkpointer_provider = CheckpointerProvider()
     cp = await _checkpointer_provider.shared()
     _graph_app = build_graph(checkpointer=cp)
     log.info("[startup] grafo compilado (checkpointer=%s)", _checkpointer_provider.kind)
+
+    # Sobe worker FIFO — drena queue Redis serialmente, 1 mensagem por vez,
+    # anti-ban WhatsApp (paralelismo dispararia N envios simultâneos).
+    _worker_stop_evt.clear()
+    _worker_task = asyncio.create_task(_queue_worker_loop(), name="queue-worker")
+    log.info("[startup] FIFO queue worker iniciado")
+
     try:
         yield
     finally:
+        _worker_stop_evt.set()
+        if _worker_task and not _worker_task.done():
+            _worker_task.cancel()
+            try:
+                await _worker_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
         if _checkpointer_provider:
             await _checkpointer_provider.aclose()
         _graph_app = None
@@ -278,6 +302,13 @@ async def _run_graph_streaming(initial_state: dict, thread_id: str) -> dict:
 @app.post("/webhook")
 @limiter.limit("60/minute")
 async def webhook(request: Request) -> dict:
+    """
+    Recebe webhook Evolution, valida, enfileira na queue Redis e retorna 200 imediato.
+
+    FIFO Worker (em _queue_worker_loop) drena queue 1 mensagem por vez —
+    anti-ban WhatsApp (paralelismo dispararia N envios simultâneos do mesmo
+    número e WhatsApp suspende a conta).
+    """
     req = request  # slowapi exige 'request' nomeado
     _check_auth(req)
     body = await req.json()
@@ -332,60 +363,34 @@ async def webhook(request: Request) -> dict:
     user_message = text or (media.get("caption") if media else "") or "[mídia]"
     log.info("[msg] %s/%s/%s: %s", project_id_hint or "?", instance, phone, user_message[:80])
 
-    initial_state = {
-        "project_id": project_id_hint,
-        "instance_name": instance,
-        "phone": phone,
-        "push_name": push_name,
-        "user_message": user_message,
-        "media_mime": media["mime"] if media else None,
-        "media_base64": media["base64"] if media else None,
-        "message_id": message_id,
-        "messages": [],
-    }
-
-    thread_id = thread_id_for(
-        project_id=project_id_hint or "padrao",
-        instance=instance,
-        phone=phone,
-    )
-
-    # Lock por (instância, telefone) — serializa mensagens do mesmo lead
-    # pra evitar 2 grafos rodando concorrentemente no mesmo histórico.
-    got_lock = await redis.acquire_lock(instance, phone, ttl_seconds=45)
-    if not got_lock:
-        log.info("[lock] %s/%s já em processamento — enfileirando ack", instance, phone)
-        return {"ok": True, "queued": True, "reason": "lock_held"}
-
+    # Sinaliza ao QStash KillSwitch — lead enviou msg, cancela follow-up pendente
     try:
-        final_state = await _run_graph_streaming(initial_state, thread_id)
-    finally:
-        await redis.release_lock(instance, phone)
+        await redis.set_last_from(instance, phone, "lead")
+    except Exception:  # noqa: BLE001
+        pass
 
-    # Agendar follow-up via QStash se a IA pediu E o cliente não converteu.
-    schedule_min = final_state.get("schedule_minutes")
-    has_converted = final_state.get("has_converted", False)
-    qstash_result: dict[str, Any] = {"skipped": True}
-    if schedule_min and not has_converted and qstash.enabled:
-        qstash_result = await qstash.schedule_followup(
-            project_id=final_state.get("project_id") or "padrao",
-            instance=instance,
-            phone=phone,
-            delay_minutes=schedule_min,
-            push_name=push_name,
-        )
-        log.info("[qstash] schedule_followup → %s", qstash_result)
-
-    return {
-        "ok": True,
-        "processed": True,
-        "intent": final_state.get("intent"),
-        "has_converted": has_converted,
-        "schedule_minutes": schedule_min,
-        "sent_count": final_state.get("sent_count", 0),
-        "flow_dispatched": final_state.get("flow_dispatched", False),
-        "qstash": qstash_result,
+    # Empilha na FIFO global — worker drena
+    queue_payload = {
+        "kind": "inbound",
+        "instance": instance,
+        "phone": phone,
+        "message_id": message_id,
+        "enqueued_at": time.time(),
+        "initial_state": {
+            "project_id": project_id_hint,
+            "instance_name": instance,
+            "phone": phone,
+            "push_name": push_name,
+            "user_message": user_message,
+            "media_mime": media["mime"] if media else None,
+            "media_base64": media["base64"] if media else None,
+            "message_id": message_id,
+            "messages": [],
+        },
     }
+    qsize = await redis.enqueue_message(queue_payload)
+    log.info("[queue] enqueued inbound %s/%s (size=%d)", instance, phone, qsize)
+    return {"ok": True, "queued": True, "queue_size": qsize}
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -395,14 +400,14 @@ async def webhook(request: Request) -> dict:
 @app.post("/api/trigger-followup")
 @limiter.limit("30/minute")
 async def trigger_followup(request: Request) -> dict:
-    req = request
     """
     Endpoint chamado pelo QStash após N minutos.
     Body: {project_id, instance_name, phone, push_name}.
 
     KillSwitch: se o lead respondeu nesse meio-tempo (last_message_from=lead),
-    cancelamos. Caso contrário, roda o grafo com intent="follow_up" injetado.
+    cancela. Caso contrário, enfileira follow-up na FIFO queue.
     """
+    req = request
     _check_auth(req)
     body = await req.json()
 
@@ -420,50 +425,141 @@ async def trigger_followup(request: Request) -> dict:
         log.info("[followup] killswitch %s/%s — lead respondeu", instance, phone)
         return {"ok": True, "skipped": "killswitch_lead_replied"}
 
-    # Roda o grafo forçando intent=follow_up (pula detect_intent na rota especialista)
-    initial_state = {
-        "project_id": project_id,
-        "instance_name": instance,
+    # Enfileira follow-up (FIFO global garante anti-spam ao misturar com inbounds)
+    queue_payload = {
+        "kind": "followup",
+        "instance": instance,
         "phone": phone,
-        "push_name": push_name,
-        "user_message": "",  # follow-up é iniciativa do bot
-        "media_mime": None,
-        "media_base64": None,
         "message_id": "",
-        "intent": "follow_up",
-        "messages": [],
+        "enqueued_at": time.time(),
+        "initial_state": {
+            "project_id": project_id,
+            "instance_name": instance,
+            "phone": phone,
+            "push_name": push_name,
+            "user_message": "",
+            "media_mime": None,
+            "media_base64": None,
+            "message_id": "",
+            "intent": "follow_up",
+            "messages": [],
+        },
     }
+    qsize = await redis.enqueue_message(queue_payload)
+    log.info("[queue] enqueued followup %s/%s (size=%d)", instance, phone, qsize)
+    return {"ok": True, "queued": True, "queue_size": qsize}
 
-    thread_id = thread_id_for(project_id, instance, phone)
-    final_state = await _run_graph_streaming(initial_state, thread_id)
 
-    # Agenda próximo follow-up se a IA pediu (escala exponencial)
-    schedule_min = final_state.get("schedule_minutes")
-    if schedule_min and qstash.enabled:
-        await qstash.schedule_followup(
-            project_id=project_id,
-            instance=instance,
-            phone=phone,
-            delay_minutes=schedule_min,
-            push_name=push_name,
+# ────────────────────────────────────────────────────────────────────
+# FIFO worker — drena queue 1 mensagem por vez (anti-ban WhatsApp)
+# ────────────────────────────────────────────────────────────────────
+
+async def _queue_worker_loop() -> None:
+    """
+    Loop infinito até _worker_stop_evt. RPOP da queue, processa, repete.
+    Pausa QUEUE_POLL_INTERVAL_S quando queue vazia (Upstash REST não suporta BRPOP).
+    """
+    backoff = QUEUE_POLL_INTERVAL_S
+    while not _worker_stop_evt.is_set():
+        try:
+            payload = await redis.dequeue_message()
+            if payload is None:
+                await asyncio.sleep(backoff)
+                backoff = min(2.0, backoff * 1.2)
+                continue
+            backoff = QUEUE_POLL_INTERVAL_S
+
+            # Descarta msgs muito antigas (cliente já desistiu de esperar)
+            enq_at = float(payload.get("enqueued_at") or 0)
+            if enq_at and (time.time() - enq_at) > QUEUE_MAX_STALE_SECONDS:
+                log.warning(
+                    "[queue] descartando stale (%.1fs) kind=%s %s/%s",
+                    time.time() - enq_at,
+                    payload.get("kind"),
+                    payload.get("instance"),
+                    payload.get("phone"),
+                )
+                continue
+
+            await _process_queued(payload)
+        except asyncio.CancelledError:
+            log.info("[queue] worker cancelado")
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.exception("[queue] erro no worker: %s", exc)
+            await asyncio.sleep(1.0)
+
+
+async def _process_queued(payload: dict[str, Any]) -> None:
+    """Processa 1 mensagem da queue: lock per phone + run graph + schedule follow-up."""
+    instance = payload.get("instance") or ""
+    phone = payload.get("phone") or ""
+    kind = payload.get("kind") or "inbound"
+    initial_state = payload.get("initial_state") or {}
+    project_id_hint = initial_state.get("project_id") or "padrao"
+
+    if not instance or not phone:
+        log.warning("[queue] payload sem instance/phone, descartando: %s", payload)
+        return
+
+    # Lock per (instance, phone) — protege contra concorrência caso worker
+    # restart deixe entry duplicada.
+    got_lock = await redis.acquire_lock(instance, phone, ttl_seconds=120)
+    if not got_lock:
+        # Lock ainda detido — re-enqueue no fim, processa outro lead enquanto isso.
+        log.info("[queue] lock_held %s/%s — re-enqueue", instance, phone)
+        await redis.requeue_head(payload)
+        await asyncio.sleep(1.0)
+        return
+
+    try:
+        thread_id = thread_id_for(project_id_hint, instance, phone)
+        final_state = await _run_graph_streaming(initial_state, thread_id)
+        log.info(
+            "[queue] processed %s %s/%s intent=%s sent=%s",
+            kind, instance, phone,
+            final_state.get("intent"),
+            final_state.get("sent_count", 0),
         )
 
-    return {
-        "ok": True,
-        "triggered": True,
-        "sent_count": final_state.get("sent_count", 0),
-        "next_schedule_min": schedule_min,
-    }
+        # Marca quem foi o último a falar — KillSwitch usa isso pra cancelar follow-ups
+        try:
+            await redis.set_last_from(instance, phone, "agent")
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Schedule follow-up se IA pediu E lead não converteu
+        schedule_min = final_state.get("schedule_minutes")
+        has_converted = final_state.get("has_converted", False)
+        if schedule_min and not has_converted and qstash.enabled:
+            r = await qstash.schedule_followup(
+                project_id=final_state.get("project_id") or project_id_hint,
+                instance=instance,
+                phone=phone,
+                delay_minutes=schedule_min,
+                push_name=initial_state.get("push_name", ""),
+            )
+            log.info("[qstash] schedule_followup → %s", r)
+    finally:
+        await redis.release_lock(instance, phone)
 
 
 @app.get("/health")
 async def health() -> dict:
+    qsize = 0
+    try:
+        qsize = await redis.queue_length()
+    except Exception:  # noqa: BLE001
+        pass
+    worker_alive = bool(_worker_task and not _worker_task.done())
     return {
         "ok": True,
         "redis": "remote" if redis.remote_enabled else "local-fallback",
         "evolution": bool(os.getenv("EVOLUTION_API_URL")),
         "checkpointer": _checkpointer_provider.kind if _checkpointer_provider else "uninit",
         "qstash": qstash.enabled,
+        "queue_size": qsize,
+        "worker_alive": worker_alive,
     }
 
 
