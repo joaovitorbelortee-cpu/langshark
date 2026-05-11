@@ -341,6 +341,29 @@ async def create_instance(
             )
         except httpx.HTTPError:
             pass  # best-effort
+
+        # CRÍTICO: configura webhook pra Evolution mandar eventos pro nosso /webhook/evolution
+        # Sem isso, msgs do WhatsApp NÃO chegam no bot.
+        pub_url = _public_base_url()
+        secret = (os.getenv("WEBHOOK_SECRET") or "").strip()
+        if pub_url and secret:
+            try:
+                await c.post(
+                    f"{base_url}/webhook/set/{name}",
+                    headers={"apikey": api_key, "Content-Type": "application/json"},
+                    json={
+                        "webhook": {
+                            "url": f"{pub_url}/webhook/evolution",
+                            "enabled": True,
+                            "webhookByEvents": False,
+                            "webhookBase64": True,
+                            "headers": {"apikey": secret, "Content-Type": "application/json"},
+                            "events": ["MESSAGES_UPSERT", "MESSAGES_UPDATE", "CONNECTION_UPDATE", "SEND_MESSAGE"],
+                        }
+                    },
+                )
+            except httpx.HTTPError:
+                pass  # best-effort
     # Bind ao projeto (tabela instance_projects)
     if project_id:
         from panel.repos import _supabase_creds, _headers
@@ -466,6 +489,114 @@ async def get_instance_status(
         d = r.json()
     inst = d.get("instance") or {}
     return {"state": inst.get("state") or "unknown"}
+
+
+def _public_base_url() -> str:
+    """Resolve URL pública do app pra config de webhook na Evolution."""
+    raw = (os.getenv("PUBLIC_BASE_URL") or "").strip()
+    if not raw:
+        raw = (os.getenv("RAILWAY_PUBLIC_DOMAIN") or "").strip()
+    if not raw:
+        return ""
+    if not raw.startswith("http"):
+        raw = "https://" + raw
+    return raw.rstrip("/")
+
+
+@admin_router.post("/instances/{instance_name}/configure-webhook")
+async def configure_webhook(
+    instance_name: str,
+    user: Annotated[dict[str, Any], Depends(require_admin)],
+) -> dict[str, Any]:
+    """
+    Configura Evolution pra mandar eventos pro nosso /webhook/evolution.
+    Crítico — sem isso, msgs do WhatsApp não chegam no bot.
+    Run em instâncias existentes que foram criadas sem webhook setado.
+    """
+    base_url, api_key = _evolution_creds()
+    if not base_url:
+        raise HTTPException(status_code=503, detail="EVOLUTION_API_URL ausente")
+    pub_url = _public_base_url()
+    if not pub_url:
+        raise HTTPException(status_code=503, detail="PUBLIC_BASE_URL ausente — não dá pra resolver webhook URL")
+    secret = (os.getenv("WEBHOOK_SECRET") or "").strip()
+    if not secret:
+        raise HTTPException(status_code=503, detail="WEBHOOK_SECRET ausente")
+
+    webhook_url = f"{pub_url}/webhook/evolution"
+    import httpx
+    payload = {
+        "webhook": {
+            "url": webhook_url,
+            "enabled": True,
+            "webhookByEvents": False,
+            "webhookBase64": True,  # mídia já vem em base64
+            "headers": {
+                "apikey": secret,  # autentica como WEBHOOK_SECRET
+                "Content-Type": "application/json",
+            },
+            "events": [
+                "MESSAGES_UPSERT",   # mensagens recebidas
+                "MESSAGES_UPDATE",   # status (read/delivered)
+                "CONNECTION_UPDATE", # status conexão
+                "SEND_MESSAGE",      # confirmação envio
+            ],
+        }
+    }
+    async with httpx.AsyncClient(timeout=10.0) as c:
+        # Evolution v2 endpoint: /webhook/set/{instance}
+        r = await c.post(
+            f"{base_url}/webhook/set/{instance_name}",
+            headers={"apikey": api_key, "Content-Type": "application/json"},
+            json=payload,
+        )
+        if not r.is_success:
+            raise HTTPException(status_code=r.status_code, detail=r.text[:300])
+        result = r.json() if r.content else {}
+    await _audit(user, "instance.configure_webhook", "evolution_instance", instance_name, webhook_url=webhook_url)
+    return {"ok": True, "instance": instance_name, "webhook_url": webhook_url, "evolution": result}
+
+
+@admin_router.get("/instances/{instance_name}/diagnose")
+async def diagnose_instance(
+    instance_name: str,
+    user: Annotated[dict[str, Any], Depends(require_admin)],
+) -> dict[str, Any]:
+    """
+    Diagnóstico completo da instance: status conexão + settings + webhook + telefone.
+    Use quando bot não responde pra ver o que tá quebrado.
+    """
+    base_url, api_key = _evolution_creds()
+    if not base_url:
+        raise HTTPException(status_code=503, detail="EVOLUTION_API_URL ausente")
+    import httpx
+    report: dict[str, Any] = {"instance_name": instance_name}
+    async with httpx.AsyncClient(timeout=8.0) as c:
+        # 1. Estado da conexão
+        try:
+            r = await c.get(f"{base_url}/instance/connectionState/{instance_name}", headers={"apikey": api_key})
+            report["connection"] = r.json() if r.is_success else {"error": r.status_code}
+        except httpx.HTTPError as e:
+            report["connection"] = {"error": str(e)[:120]}
+        # 2. Settings
+        try:
+            r = await c.get(f"{base_url}/settings/find/{instance_name}", headers={"apikey": api_key})
+            report["settings"] = r.json() if r.is_success else {"error": r.status_code}
+        except httpx.HTTPError as e:
+            report["settings"] = {"error": str(e)[:120]}
+        # 3. Webhook config
+        try:
+            r = await c.get(f"{base_url}/webhook/find/{instance_name}", headers={"apikey": api_key})
+            report["webhook"] = r.json() if r.is_success else {"error": r.status_code}
+        except httpx.HTTPError as e:
+            report["webhook"] = {"error": str(e)[:120]}
+    # 4. Expected webhook URL
+    pub = _public_base_url()
+    report["expected_webhook_url"] = f"{pub}/webhook/evolution" if pub else None
+    # 5. Webhook URL match?
+    actual_url = ((report.get("webhook") or {}).get("url") or "") if isinstance(report.get("webhook"), dict) else ""
+    report["webhook_match"] = bool(pub and actual_url and actual_url.startswith(pub))
+    return report
 
 
 # ────────────────────────────────────────────────────────────────────
