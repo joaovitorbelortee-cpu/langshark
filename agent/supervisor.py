@@ -39,6 +39,24 @@ E faz sentido no contexto da conversa.
 
 VOCÊ NÃO ESCREVE A RESPOSTA. VOCÊ APENAS APROVA OU REJEITA.
 
+═══ MÉTODO DE RACIOCÍNIO (chain-of-thought OBRIGATÓRIO) ═══
+
+ANTES de aprovar/rejeitar, PENSE em SEQUÊNCIA:
+
+  Passo 1 — CONTEXTO: O que o cliente FALOU nas últimas 3 msgs? Qual o objetivo claro dele?
+  Passo 2 — PLATAFORMA: O cliente mencionou ALGUMA plataforma? Game Pass funciona nela?
+            ⚠ PRODUTO É GAME PASS ULTIMATE (Microsoft). FUNCIONA em: Xbox, PC, Android,
+            iOS, xCloud, TV (via app Xbox). NÃO FUNCIONA em: PS3/PS4/PS5/PlayStation,
+            Sony, Nintendo Switch/Wii/3DS. Se cliente tem PS/Nintendo, BOT DEVE RECUSAR
+            educadamente, NÃO vender.
+  Passo 3 — ESTÁGIO: Em que etapa está? (descoberta/apresentacao/preco/objecao/fechamento)
+            A resposta do agente respeita esse estágio?
+  Passo 4 — REGRAS: A resposta viola PLATAFORMA-FIRST, LINK-só-após-confirmação,
+            PLANOS-RESTRITOS, ANTI-REPETIÇÃO, INVENCIONICES?
+  Passo 5 — HUMANIZAÇÃO: Tom natural? Sem frases batidas? Pontuação humana?
+
+Só DEPOIS desses 5 passos, decide approved=true/false.
+
 ═══ CHECAGEM CRÍTICA ═══
 
 1. PLATAFORMA-FIRST: Agente perguntou a plataforma do lead ANTES de oferecer
@@ -498,6 +516,77 @@ def _check_length(proposed: str) -> dict[str, Any] | None:
     return None
 
 
+# Plataformas INCOMPATÍVEIS com Game Pass (produto Microsoft).
+# Game Pass roda apenas em: Xbox One/Series, PC Windows, Android, iOS (cloud xCloud).
+# NÃO funciona em: PS3/PS4/PS5/PlayStation/Sony, Nintendo Switch/Wii/3DS, etc.
+_INCOMPAT_PLATFORM_KEYWORDS = (
+    r"\bps[\s-]*[2-5]\b",      # PS2, PS3, PS4, PS5
+    r"\bps\b",                  # "PS" sozinho
+    r"\bplaystation\b",
+    r"\bsony\b",
+    r"\bnintendo\b",
+    r"\bswitch\b",
+    r"\bwii\b",
+    r"\b3ds\b",
+    r"\bsteam[\s-]*deck\b",     # Steam Deck rola PC mas via SteamOS = caso especial
+)
+
+_PRODUCT_MENTION = re.compile(
+    r"\b(game\s*pass|gamepass|xbox|compartilhad[ao]|privad[ao])\b",
+    re.IGNORECASE,
+)
+
+
+def _check_platform_incompatibility(
+    proposed: str,
+    messages: list[BaseMessage],
+) -> dict[str, Any] | None:
+    """
+    Bot oferece produto incompatível com plataforma do lead?
+
+    Game Pass NÃO funciona em PS/PlayStation/Nintendo/Switch. Lead mencionou
+    uma dessas + bot ofereceu plano = bug grave (perde credibilidade + reembolso).
+
+    Estratégia: olha últimas 4 msgs do user. Se mencionou plataforma incompatível
+    E bot reply tem menção a produto/plano → reject.
+    """
+    if not proposed:
+        return None
+    if not _PRODUCT_MENTION.search(proposed):
+        return None
+
+    # Procura últimas 4 msgs do user
+    recent_user_text = ""
+    user_count = 0
+    for m in reversed(messages or []):
+        if getattr(m, "type", "") == "human":
+            content = getattr(m, "content", "")
+            if isinstance(content, str) and content.strip():
+                recent_user_text += " " + content.lower()
+                user_count += 1
+                if user_count >= 4:
+                    break
+
+    # Detecta plataforma incompatível
+    for pattern in _INCOMPAT_PLATFORM_KEYWORDS:
+        m = re.search(pattern, recent_user_text, re.IGNORECASE)
+        if m:
+            matched = m.group(0)
+            return {
+                "approved": False,
+                "reason": f"lead tem {matched} (incompatível Game Pass)",
+                "feedback": (
+                    f"O cliente mencionou {matched.upper()} — Game Pass É PRODUTO MICROSOFT, "
+                    "NÃO funciona em PlayStation/Sony/Nintendo. NÃO ofereça plano/preço. "
+                    "REESCREVA: explique educadamente que Game Pass roda em Xbox/PC/Android/iOS, "
+                    "NÃO em PlayStation. Pergunta se ele tem outro dispositivo (PC/Xbox/celular) "
+                    "ou agradece o interesse sem forçar venda. NUNCA invente que funciona."
+                ),
+                "severity": "critical",
+            }
+    return None
+
+
 def _check_platform_first(
     proposed: str,
     lead_facts: dict[str, Any] | None,
@@ -687,6 +776,12 @@ async def review_reply(
     if length_review:
         log.info("[supervisor] comprimento rejeitou: %s", length_review["reason"])
         return length_review
+
+    # Fail-fast: bot oferecendo produto pra plataforma INCOMPATÍVEL
+    incompat_review = _check_platform_incompatibility(proposed_reply, messages or [])
+    if incompat_review:
+        log.warning("[supervisor] PLATAFORMA-INCOMPATÍVEL rejeitou: %s", incompat_review["reason"])
+        return incompat_review
 
     convo = _conversation_to_text(messages)
     facts_str = json.dumps(lead_facts or {}, ensure_ascii=False, indent=2)
