@@ -384,6 +384,29 @@ def _build_system_prompt(
     return prompt
 
 
+# Cache TTL 30s pra episodic/lessons fetch — evita query store em cada turn.
+# Dados não mudam tão rápido (wins/lessons gravados pós-conversa, leitura é hot).
+_FETCH_CACHE: dict[str, tuple[str, float]] = {}
+_FETCH_CACHE_TTL = 30.0
+
+
+def _cache_get(key: str) -> str | None:
+    import time as _t
+    entry = _FETCH_CACHE.get(key)
+    if entry and entry[1] > _t.time():
+        return entry[0]
+    return None
+
+
+def _cache_set(key: str, value: str) -> None:
+    import time as _t
+    # Cap em 200 entries pra evitar growth multi-tenant
+    if len(_FETCH_CACHE) >= 200:
+        oldest = min(_FETCH_CACHE, key=lambda k: _FETCH_CACHE[k][1])
+        _FETCH_CACHE.pop(oldest, None)
+    _FETCH_CACHE[key] = (value, _t.time() + _FETCH_CACHE_TTL)
+
+
 async def _fetch_episodic_examples(
     project_id: str,
     lead_facts: dict[str, Any] | None,
@@ -391,17 +414,23 @@ async def _fetch_episodic_examples(
 ) -> str:
     """
     Busca 'wins' anteriores (conversas que converteram) com mesma plataforma
-    do lead atual. Renderiza como few-shot pra prompt.
+    do lead atual. Renderiza como few-shot pra prompt. Cached 30s.
 
     Padrão LangGraph Episodic Memory (docs.langchain.com/concepts/memory):
     few-shot examples são mais eficazes que instruções textuais.
 
     Retorna "" se store não disponível ou sem matches.
     """
+    plataforma_key = (lead_facts or {}).get("plataforma") or "none"
+    cache_key = f"episodic:{project_id}:{plataforma_key}:{max_examples}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
     try:
         from agent.store import get_shared_store
         store = get_shared_store()
         if store is None:
+            _cache_set(cache_key, "")
             return ""
         plataforma = (lead_facts or {}).get("plataforma")
         # Filter-based search (sem embeddings ainda). Quando habilitar vector index,
@@ -415,6 +444,7 @@ async def _fetch_episodic_examples(
             limit=max_examples,
         )
         if not results:
+            _cache_set(cache_key, "")
             return ""
         parts: list[str] = []
         for idx, item in enumerate(results, 1):
@@ -426,7 +456,9 @@ async def _fetch_episodic_examples(
             for turn in convo:
                 lines.append(f"{turn.get('role', '?')}: {turn.get('text', '')}")
             parts.append("\n".join(lines))
-        return "\n\n".join(parts)
+        rendered = "\n\n".join(parts)
+        _cache_set(cache_key, rendered)
+        return rendered
     except Exception as exc:  # noqa: BLE001
         log.warning("[episodic] fetch falhou: %s", exc)
         return ""
@@ -481,21 +513,25 @@ async def _fetch_procedural_lessons(
     """
     Lê últimas N lessons do Store + renderiza como bloco pro system prompt.
     Especialistas leem antes de gerar resposta pra evitar repetir erros.
+    Cached 30s — lessons não mudam tão rápido entre turns.
     """
+    cache_key = f"lessons:{project_id}:{max_lessons}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
     try:
         from agent.store import get_shared_store
         store = get_shared_store()
         if store is None:
+            _cache_set(cache_key, "")
             return ""
-        # Sem filter — pega geral. Vector index futuro permite filtrar por
-        # situação similar ao estado atual.
         results = await store.asearch(
             (project_id, "lessons"),
-            limit=max_lessons * 3,  # mais buffer pra filtrar critical primeiro
+            limit=max_lessons * 3,
         )
         if not results:
+            _cache_set(cache_key, "")
             return ""
-        # Priorize critical > warning > resto
         sorted_results = sorted(
             results,
             key=lambda it: (
@@ -513,7 +549,9 @@ async def _fetch_procedural_lessons(
             lines.append(f"{idx}. [{sev}] {reason}")
             if feedback:
                 lines.append(f"   → Como evitar: {feedback}")
-        return "\n".join(lines)
+        rendered = "\n".join(lines)
+        _cache_set(cache_key, rendered)
+        return rendered
     except Exception as exc:  # noqa: BLE001
         log.warning("[procedural] fetch falhou: %s", exc)
         return ""
