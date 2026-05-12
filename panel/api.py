@@ -861,6 +861,9 @@ async def create_flow(
         "steps":       body.get("steps") or [],
         "enabled":     body.get("enabled", True),
     })
+    # Invalida cache do bot pra ver fluxo novo imediato
+    from agent.flows import invalidate_flows_cache
+    invalidate_flows_cache(project_id)
     await _audit(user, "flow.create", "flow", str(row.get("id", "")), name=name, project_id=project_id)
     return {"ok": True, "flow": row}
 
@@ -874,6 +877,9 @@ async def patch_flow(
     allowed = {"name", "description", "steps", "enabled"}
     payload = {k: v for k, v in body.items() if k in allowed}
     row = await _flows_repo.patch(flow_id, payload)
+    # Invalida cache (não temos project_id aqui — limpa tudo)
+    from agent.flows import invalidate_flows_cache
+    invalidate_flows_cache()
     await _audit(user, "flow.patch", "flow", flow_id, fields=list(payload.keys()))
     return {"ok": True, "flow": row}
 
@@ -884,6 +890,8 @@ async def delete_flow(
     user: Annotated[dict[str, Any], Depends(require_admin)],
 ) -> dict[str, Any]:
     ok = await _flows_repo.delete(flow_id)
+    from agent.flows import invalidate_flows_cache
+    invalidate_flows_cache()
     await _audit(user, "flow.delete", "flow", flow_id)
     return {"ok": ok}
 
