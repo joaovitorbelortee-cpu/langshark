@@ -42,6 +42,7 @@ from agent.nodes import (
     close_sale_node,
     detect_intent_node,
     flow_executor_node,
+    flow_router_node,
     follow_up_node,
     follow_up_strategist_node,
     greeting_node,
@@ -84,6 +85,18 @@ def _route_after_intent(state: SalesState) -> str:
         return "close_path"
     # "outros" + bot já falou = retomada/continuação, vai pra respond
     return "respond_path"
+
+
+def _route_after_flow_router(state: SalesState) -> str:
+    """
+    Após flow_router decidir:
+      - Se setou flow_name → vai DIRETO pro flow_executor (skip especialista).
+      - Senão → continua _route_after_intent normal.
+    """
+    if state.get("flow_name"):
+        return "flow_path"
+    # Reusa lógica existente
+    return f"intent:{_route_after_intent(state)}"
 
 
 def _route_after_history(state: SalesState) -> str:
@@ -159,6 +172,7 @@ def build_graph(checkpointer: Any | None = None, store: Any | None = None):
     g.add_node("vision", vision_node, retry_policy=llm_retry)                  # LLM
     g.add_node("detect_intent", detect_intent_node, retry_policy=llm_retry)    # LLM
     g.add_node("lead_memory", lead_memory_node, retry_policy=llm_retry)        # LLM
+    g.add_node("flow_router", flow_router_node, retry_policy=llm_retry)        # LLM mini
     g.add_node("retrieve_for_close", retrieve_catalog_node)
     g.add_node("retrieve_for_respond", retrieve_catalog_node)
     g.add_node("close_sale", close_sale_node, retry_policy=llm_retry)          # LLM
@@ -184,18 +198,20 @@ def build_graph(checkpointer: Any | None = None, store: Any | None = None):
     )
     g.add_edge("vision", "detect_intent")
 
-    # detect_intent → lead_memory (extrai fatos) → especialista
+    # detect_intent → lead_memory (extrai fatos) → flow_router → especialista/flow
     g.add_edge("detect_intent", "lead_memory")
+    g.add_edge("lead_memory", "flow_router")
     g.add_conditional_edges(
-        "lead_memory",
-        _route_after_intent,
+        "flow_router",
+        _route_after_flow_router,
         {
-            "persist": "persist",
-            "greeting": "greeting",
-            "objection": "objection",
-            "follow_up": "follow_up",
-            "close_path": "retrieve_for_close",
-            "respond_path": "retrieve_for_respond",
+            "flow_path":             "flow_executor",
+            "intent:persist":        "persist",
+            "intent:greeting":       "greeting",
+            "intent:objection":      "objection",
+            "intent:follow_up":      "follow_up",
+            "intent:close_path":     "retrieve_for_close",
+            "intent:respond_path":   "retrieve_for_respond",
         },
     )
 

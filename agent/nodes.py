@@ -708,6 +708,54 @@ async def lead_memory_node(state: SalesState) -> dict[str, Any]:
 
 
 # ────────────────────────────────────────────────────────────────────
+# Nó: flow_router (decide disparo de fluxo pré-cadastrado)
+# ────────────────────────────────────────────────────────────────────
+
+async def flow_router_node(state: SalesState) -> dict[str, Any]:
+    """
+    Agente dedicado pra decidir flow disparo. Roda DEPOIS de lead_memory + ANTES
+    dos especialistas. Se decide flow → graph rota direto pro flow_executor (skip
+    especialista). Se nada → continua specialist normal.
+
+    Reduz alucinação porque LLM principal não decide MAIS fluxo (sobrecarga).
+    Decisão é isolada num agente focado.
+
+    Skip:
+      - intent=comprou (sem reply)
+      - intent=follow_up (bot iniciando, sem msg user nova)
+    """
+    intent = state.get("intent") or ""
+    if intent in ("comprou", "follow_up"):
+        return {}
+
+    user_msg = state.get("user_message") or ""
+    if not user_msg.strip():
+        return {}
+
+    from agent.flow_router import route_flow
+
+    try:
+        decision = await route_flow(
+            user_msg=user_msg,
+            messages=state.get("messages") or [],
+            project_id=state.get("project_id", "padrao"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[flow_router_node] erro: %s", exc)
+        return {}
+
+    if not decision.flow_name:
+        return {}
+
+    # Marca flow_name no state — graph route vai pro flow_executor
+    log.info(
+        "[flow_router_node] disparado flow=%s confidence=%s reason=%s",
+        decision.flow_name, decision.confidence, decision.reason,
+    )
+    return {"flow_name": decision.flow_name}
+
+
+# ────────────────────────────────────────────────────────────────────
 # Nó: retrieve_catalog (RAG)
 # ────────────────────────────────────────────────────────────────────
 
