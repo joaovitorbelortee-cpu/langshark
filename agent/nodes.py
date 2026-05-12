@@ -949,32 +949,51 @@ def _vision_instruction(mime: str | None) -> str:
 
 async def vision_node(state: SalesState) -> dict[str, Any]:
     """
-    Quando há mídia base64, gera HumanMessage multimodal (text + image_url) e
-    grava em `state.vision_msg`. Especialistas (respond/close_sale/_run_specialist)
-    consomem localmente, substituindo última HumanMessage no LLM call.
+    Processa mídia (imagem/áudio/vídeo/doc) e gera HumanMessage pro LLM.
 
-    CRITICAL: NÃO persiste a multimodal no `state.messages` (via add_messages).
-    Se persistisse, o checkpoint guardaria image_url eterno e turns futuros (ex:
-    follow-up) leriam isso → bot diria "recebi a mídia" sem ter recebido.
+    - IMAGEM: multimodal HumanMessage com image_url (OpenAI vision lê)
+    - ÁUDIO: transcreve via Whisper API → texto vira user_message + HumanMessage
+    - VÍDEO/DOC: text-only HumanMessage com instrução genérica (sem conteúdo)
 
-    Pula áudio: OpenAI vision aceita SÓ image. Áudio precisa Whisper transcription
-    (não implementado) — passa direto pro LLM com placeholder textual.
+    Resultado vai em `state.vision_msg` (não persiste no checkpoint).
     """
     mime = state.get("media_mime")
     b64 = state.get("media_base64")
     if not mime or not b64:
         return {}
 
-    # OpenAI vision aceita apenas imagens. Áudio/vídeo/doc: usa só instrução text,
-    # sem image_url (evita BadRequestError "Only image types are supported").
     kind = mime.split("/")[0]
-    is_image = kind == "image"
-
     instruction = _vision_instruction(mime)
     caption_text = state.get("user_message") or ""
-    text_part = f"{instruction}\n\nLegenda do cliente: \"{caption_text}\"" if caption_text else instruction
 
-    if is_image:
+    # ──── ÁUDIO: Whisper transcription ────
+    if kind == "audio":
+        from agent.transcribe import transcribe_audio
+        transcribed = await transcribe_audio(b64, mime)
+        if transcribed:
+            log.info("[vision] audio transcrito (%d chars): %s", len(transcribed), transcribed[:60])
+            # Cliente "falou" — usa texto transcrito como se fosse msg text normal
+            text_for_llm = (
+                f"[áudio transcrito do cliente]: {transcribed}"
+                + (f"\n[legenda original]: {caption_text}" if caption_text else "")
+            )
+            return {
+                "vision_msg": HumanMessage(content=text_for_llm),
+                # Sobrescreve user_message pra lead_memory/intent rodarem em cima do texto real
+                "user_message": transcribed,
+            }
+        # Transcrição falhou — fallback texto neutro (não inventa conteúdo)
+        log.warning("[vision] Whisper falhou — fallback genérico")
+        fallback_text = (
+            "O cliente enviou um áudio que nao foi possivel ouvir agora. "
+            "Pede educadamente pra ele mandar a info por texto, dizendo que "
+            "fica mais facil pra responder."
+        )
+        return {"vision_msg": HumanMessage(content=fallback_text)}
+
+    # ──── IMAGEM: vision multimodal (OpenAI vision lê) ────
+    if kind == "image":
+        text_part = f"{instruction}\n\nLegenda do cliente: \"{caption_text}\"" if caption_text else instruction
         data_url = f"data:{mime};base64,{b64}"
         multimodal_user = HumanMessage(
             content=[
@@ -982,12 +1001,11 @@ async def vision_node(state: SalesState) -> dict[str, Any]:
                 {"type": "image_url", "image_url": {"url": data_url}},
             ]
         )
-    else:
-        # Não-imagem: text-only HumanMessage com instrução (sem image_url pra evitar 400)
-        multimodal_user = HumanMessage(content=text_part)
+        return {"vision_msg": multimodal_user}
 
-    # Grava em state.vision_msg (não persiste via add_messages — sem reducer)
-    return {"vision_msg": multimodal_user}
+    # ──── VÍDEO/DOC: text-only (sem conteúdo real) ────
+    text_part = f"{instruction}\n\nLegenda do cliente: \"{caption_text}\"" if caption_text else instruction
+    return {"vision_msg": HumanMessage(content=text_part)}
 
 
 def _inject_vision_into_history(
