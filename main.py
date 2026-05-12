@@ -1049,6 +1049,81 @@ async def health() -> dict:
     }
 
 
+@app.post("/webhook/reset-admin")
+async def webhook_reset_admin(request: Request) -> dict:
+    """
+    Reset/criar admin via WEBHOOK_SECRET (sem precisar login painel).
+
+    Use quando esqueceu senha do painel. Auth = mesma do webhook normal.
+
+      curl -X POST -H "apikey: $WEBHOOK_SECRET" \\
+        -H "Content-Type: application/json" \\
+        -d '{"email":"admin@local","password":"nova-senha-forte"}' \\
+        https://app.up.railway.app/webhook/reset-admin
+    """
+    _check_auth(request)
+    body = await request.json()
+    email = (body.get("email") or "").strip().lower()
+    password = (body.get("password") or "").strip()
+    display_name = (body.get("display_name") or email.split("@")[0]).strip()
+
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="email obrigatório (formato user@host)")
+    if not password or len(password) < 6:
+        raise HTTPException(status_code=400, detail="password obrigatório (>= 6 chars)")
+
+    sb_url = (os.getenv("SUPABASE_URL") or "").rstrip("/")
+    sb_key = (os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY") or "").strip()
+    if not sb_url or not sb_key:
+        raise HTTPException(status_code=503, detail="SUPABASE_URL/SUPABASE_SERVICE_KEY ausentes")
+
+    from panel.auth import hash_password
+    import httpx
+    pwd_hash = hash_password(password)
+
+    async with httpx.AsyncClient(timeout=10.0) as c:
+        # Tenta UPDATE primeiro
+        r = await c.patch(
+            f"{sb_url}/rest/v1/admin_users",
+            params={"email": f"eq.{email}"},
+            headers={
+                "apikey": sb_key,
+                "Authorization": f"Bearer {sb_key}",
+                "Content-Type": "application/json",
+                "Prefer": "return=representation",
+            },
+            json={"password_hash": pwd_hash, "display_name": display_name},
+        )
+        if not r.is_success:
+            raise HTTPException(status_code=502, detail=f"Supabase erro: {r.text[:200]}")
+        existing = r.json() or []
+        if existing:
+            log.info("[reset-admin] update senha %s", email)
+            return {"ok": True, "action": "updated", "email": email, "id": existing[0].get("id")}
+
+        # INSERT novo
+        r2 = await c.post(
+            f"{sb_url}/rest/v1/admin_users",
+            headers={
+                "apikey": sb_key,
+                "Authorization": f"Bearer {sb_key}",
+                "Content-Type": "application/json",
+                "Prefer": "return=representation",
+            },
+            json={
+                "email": email,
+                "password_hash": pwd_hash,
+                "display_name": display_name,
+                "project_ids": [],
+            },
+        )
+        if not r2.is_success:
+            raise HTTPException(status_code=502, detail=f"Supabase erro: {r2.text[:200]}")
+        created = r2.json() or []
+        log.info("[reset-admin] criou %s", email)
+        return {"ok": True, "action": "created", "email": email, "id": (created[0].get("id") if created else None)}
+
+
 @app.get("/webhook/self-check")
 async def webhook_self_check(request: Request) -> dict:
     """
