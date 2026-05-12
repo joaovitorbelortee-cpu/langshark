@@ -655,11 +655,14 @@ async def review_reply(
         raw = re.sub(r"\s*```$", "", raw)
         parsed = json.loads(raw)
     except (json.JSONDecodeError, ValueError) as exc:
-        log.warning("[supervisor] parse falhou (%s) — default approve", exc)
-        return {"approved": True, "reason": "supervisor parse error", "feedback": None, "severity": "ok"}
+        log.warning("[supervisor] parse falhou (%s) — default approve (passou 6 camadas programáticas)", exc)
+        # Default approve só faz sentido AQUI porque já passou pelas 6 camadas
+        # programáticas (anti-rep, fraud, plataforma, link, pontuação, length).
+        # Se chegou aqui, reply já é razoável — só LLM contextual falhou parse.
+        return {"approved": True, "reason": "supervisor parse error (camadas programáticas OK)", "feedback": None, "severity": "ok"}
     except Exception as exc:  # noqa: BLE001
-        log.warning("[supervisor] LLM erro (%s) — default approve", exc)
-        return {"approved": True, "reason": "supervisor llm error", "feedback": None, "severity": "ok"}
+        log.warning("[supervisor] LLM erro (%s) — approve (camadas programáticas já validaram)", exc)
+        return {"approved": True, "reason": "supervisor llm error (camadas programáticas OK)", "feedback": None, "severity": "ok"}
 
     # Sanitize
     approved = bool(parsed.get("approved", True))

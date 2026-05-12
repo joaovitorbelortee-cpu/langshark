@@ -927,23 +927,30 @@ async def persist_node(state: SalesState) -> dict[str, Any]:
     bot aprender com sucessos. Retrieval em retrieve_catalog usa pra few-shot.
     """
     redis = get_redis()
+    instance = state.get("instance_name") or ""
+    phone = state.get("phone") or ""
+    if not instance or not phone:
+        log.warning("[persist] sem instance/phone — skip")
+        return {}
     if state.get("user_message"):
-        await redis.append_message(
-            instance=state["instance_name"],
-            phone=state["phone"],
-            role="user",
-            content=state["user_message"],
-        )
-        # KillSwitch: marca último turno como "lead" (pra cancelar follow-up agendado)
-        await redis.set_last_from(state["instance_name"], state["phone"], "lead")
+        try:
+            await redis.append_message(
+                instance=instance, phone=phone, role="user",
+                content=state["user_message"],
+            )
+            # KillSwitch: marca último turno como "lead" (pra cancelar follow-up agendado)
+            await redis.set_last_from(instance, phone, "lead")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[persist] redis user-side falhou: %s", exc)
     if state.get("reply"):
-        await redis.append_message(
-            instance=state["instance_name"],
-            phone=state["phone"],
-            role="model",
-            content=state["reply"],
-        )
-        await redis.set_last_from(state["instance_name"], state["phone"], "agent")
+        try:
+            await redis.append_message(
+                instance=instance, phone=phone, role="model",
+                content=state["reply"],
+            )
+            await redis.set_last_from(instance, phone, "agent")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[persist] redis model-side falhou: %s", exc)
 
     # Episodic memory: lead converteu? Salva o "win" pro Store.
     converted = bool(state.get("has_converted")) or state.get("intent") == "comprou"
@@ -1685,10 +1692,13 @@ async def send_node(state: SalesState) -> dict[str, Any]:
     from agent.tools import jitter_between_bubbles_ms, typing_delay_ms
 
     evo = get_evolution()
-    instance = state["instance_name"]
-    phone = state["phone"]
+    instance = state.get("instance_name") or ""
+    phone = state.get("phone") or ""
     message_id = state.get("message_id", "")
     redis = get_redis()
+    if not instance or not phone:
+        log.warning("[send] payload sem instance/phone — skip")
+        return {"sent": False, "sent_count": 0}
 
     # Cooldowns server-side — bloqueia spam mesmo se LLM emitir tags em sequência
     REACT_COOLDOWN_S = 240   # 4 min
