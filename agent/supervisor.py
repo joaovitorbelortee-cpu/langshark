@@ -264,6 +264,118 @@ _PRICE_PATTERNS = [
     re.compile(r"\bplano de\s*\d", re.IGNORECASE),       # "plano de 40"
 ]
 
+_PAYMENT_LINK_PATTERN = re.compile(
+    r"(ggcheckout\.com|pagseguro\.com|mercadopago\.com|stripe\.com|"
+    r"hotmart\.com|monetizze\.com|checkout/v2|"
+    r"https?://[a-zA-Z0-9.-]+/(checkout|pagamento|pay|buy)/)",
+    re.IGNORECASE,
+)
+
+# Keywords lead deve falar pra autorizar link
+_CONFIRM_KEYWORDS = (
+    "vou pegar", "vou querer", "quero esse", "quero pegar", "fechado",
+    "manda o link", "manda link", "manda o pix", "manda pix", "pode mandar",
+    "vou comprar", "to dentro", "fechou", "vamos fechar", "bora", "topo",
+    "ja vou pagar", "vou pagar agora", "qual o pix", "qual link", "qual o link",
+    "como pago", "onde pago",
+)
+
+
+def _check_link_without_confirmation(
+    proposed: str,
+    messages: list[BaseMessage],
+    lead_facts: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """
+    Bloqueia link de pagamento sem o lead ter CONFIRMADO interesse.
+
+    Lead falar plataforma ("pc", "console") NÃO é confirmação de compra.
+    Precisa frase explícita ("vou pegar", "manda o link", "quero fechar").
+    """
+    if not proposed:
+        return None
+    if not _PAYMENT_LINK_PATTERN.search(proposed):
+        return None
+
+    facts = lead_facts or {}
+    # Lead já confirmou compra antes → libera
+    if facts.get("confirmou_compra") or facts.get("ja_recebeu_link"):
+        return None
+
+    # Check últimas 3 msgs do user — alguma confirma intenção de compra?
+    recent_user: list[str] = []
+    for m in reversed(messages or []):
+        if getattr(m, "type", "") == "human":
+            content = getattr(m, "content", "")
+            if isinstance(content, str):
+                recent_user.append(content.lower())
+                if len(recent_user) >= 3:
+                    break
+
+    confirmed = any(
+        kw in msg for msg in recent_user for kw in _CONFIRM_KEYWORDS
+    )
+    if confirmed:
+        return None
+
+    last_msg = recent_user[0] if recent_user else ""
+    return {
+        "approved": False,
+        "reason": "mandou link sem cliente confirmar interesse",
+        "feedback": (
+            "Você mandou LINK DE PAGAMENTO mas o cliente NÃO confirmou que quer "
+            "comprar. Ele falou apenas plataforma/dúvida básica, não 'vou pegar' "
+            "ou 'manda o link'. REMOVA o link. Apresente o plano certo, mostra "
+            "valor + vantagem, e pergunta tipo 'curtiu? te mando o link?' — "
+            f"última msg do lead foi: \"{last_msg[:80]}\"."
+        ),
+        "severity": "critical",
+    }
+
+
+# Pontuação robotic patterns
+_EXCLAM_LIMIT = 1  # max "!" por reply
+_PERIOD_AT_END_LIMIT = 0.6  # >60% frases terminando em "." = robotic
+
+
+def _check_punctuation(proposed: str) -> dict[str, Any] | None:
+    """
+    Detecta pontuação robotic: muitos "!" OU pontos finais em quase TODA frase.
+    """
+    if not proposed or len(proposed) < 20:
+        return None
+    # Conta "!"
+    exclam = proposed.count("!")
+    if exclam > _EXCLAM_LIMIT + 1:  # margem 1 — 2 "!" ok, 3+ não
+        return {
+            "approved": False,
+            "reason": f"{exclam} exclamações — robotic",
+            "feedback": (
+                f"Você usou {exclam} '!' na resposta. Soa robótico/forçado. "
+                "Reduz pra no MÁXIMO 1. Use '!' SÓ em emoção real (lead fechou compra, "
+                "novidade legal). Resto: nada, vírgula, ou reticências."
+            ),
+            "severity": "warning",
+        }
+    # Conta sentences terminando em "."
+    sentences = [s.strip() for s in re.split(r"\n+|(?<=[.!?])\s+", proposed) if s.strip()]
+    if len(sentences) >= 3:
+        dot_endings = sum(1 for s in sentences if s.endswith("."))
+        ratio = dot_endings / len(sentences)
+        if ratio >= _PERIOD_AT_END_LIMIT:
+            return {
+                "approved": False,
+                "reason": f"{int(ratio*100)}% frases com '.' no fim — robotic",
+                "feedback": (
+                    "Quase TODA frase sua termina com '.'. Soa robot/escrito formal. "
+                    "WhatsApp real ninguém pontua tudo certinho. Mistura: tira o '.' "
+                    "da maioria, deixa só vírgula ou nada. Ex: 'beleza, vou olhar aqui' "
+                    "em vez de 'Beleza. Vou olhar aqui.'"
+                ),
+                "severity": "warning",
+            }
+    return None
+
 
 def _check_platform_first(
     proposed: str,
@@ -429,6 +541,18 @@ async def review_reply(
     if platform_review:
         log.warning("[supervisor] PLATAFORMA-FIRST rejeitou: %s", platform_review["reason"])
         return platform_review
+
+    # Fail-fast: link de pagamento sem cliente confirmar interesse
+    link_review = _check_link_without_confirmation(proposed_reply, messages or [], lead_facts)
+    if link_review:
+        log.warning("[supervisor] LINK sem confirmação rejeitou: %s", link_review["reason"])
+        return link_review
+
+    # Fail-fast: pontuação robotic (muitos ! ou . em toda frase)
+    punct_review = _check_punctuation(proposed_reply)
+    if punct_review:
+        log.info("[supervisor] pontuação rejeitou: %s", punct_review["reason"])
+        return punct_review
 
     convo = _conversation_to_text(messages)
     facts_str = json.dumps(lead_facts or {}, ensure_ascii=False, indent=2)
