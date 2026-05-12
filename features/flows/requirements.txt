@@ -1,0 +1,3 @@
+httpx>=0.27
+# Opcional, só pra panel_endpoints.py:
+fastapi>=0.115

@@ -7,3 +7,10 @@ __pycache__/
 chroma_db/
 .pytest_cache/
 .qr.html
+
+# Env dumps com secrets — NÃO comitar
+envs-pedidas.txt
+envs-real.txt
+supabase-envs.txt
+*-envs.txt
+!envs-template.txt
