@@ -340,8 +340,56 @@ def _check_link_without_confirmation(
 
 
 # Pontuação robotic patterns
-_EXCLAM_LIMIT = 1  # max "!" por reply
+_EXCLAM_LIMIT = 1  # max "!" por reply (stricter — 2+ "!" reject)
 _PERIOD_AT_END_LIMIT = 0.6  # >60% frases terminando em "." = robotic
+
+# Frases batidas que SOAM ROBOT — não usar
+_CANNED_PHRASES = (
+    "como posso te ajudar",
+    "como posso ajudar",
+    "estou aqui pra ajudar",
+    "to aqui pra ajudar",
+    "tô aqui pra ajudar",
+    "estou à disposição",
+    "estou a disposição",
+    "qualquer dúvida estou",
+    "qualquer duvida estou",
+    "fique à vontade",
+    "fique a vontade",
+    "sou seu assistente",
+    "sou um vendedor",
+    "sou o vendedor",
+    "como vai você",
+    "espero que esteja bem",
+    "tudo bem por aí",
+    "se precisar de ajuda",  # ← spam follow-up clássico
+    "se tiver alguma pergunta",
+    "se tiver duvida",
+    "se tiver dúvida",
+    "pode contar comigo",
+    "no que posso ajudar",
+)
+
+
+def _check_canned_phrases(proposed: str) -> dict[str, Any] | None:
+    """Detecta frases batidas/template típicas de bot."""
+    if not proposed:
+        return None
+    norm = proposed.lower()
+    matched = next((p for p in _CANNED_PHRASES if p in norm), None)
+    if matched:
+        return {
+            "approved": False,
+            "reason": f"frase batida: \"{matched}\"",
+            "feedback": (
+                f"Você usou \"{matched}\" — frase batida de bot. NÃO use frases prontas. "
+                "Escreva algo ESPECÍFICO ao contexto do lead. Se está em silêncio, "
+                "puxa retomada baseada no ULTIMO_RESUMO do lead_conhecido (algo concreto "
+                "da conversa anterior), não pergunta genérica. Sempre VARIE."
+            ),
+            "severity": "critical",
+        }
+    return None
 
 
 def _check_punctuation(proposed: str) -> dict[str, Any] | None:
@@ -350,16 +398,16 @@ def _check_punctuation(proposed: str) -> dict[str, Any] | None:
     """
     if not proposed or len(proposed) < 20:
         return None
-    # Conta "!"
+    # Conta "!" — 2+ exclamações = robot
     exclam = proposed.count("!")
-    if exclam > _EXCLAM_LIMIT + 1:  # margem 1 — 2 "!" ok, 3+ não
+    if exclam >= 2:
         return {
             "approved": False,
             "reason": f"{exclam} exclamações — robotic",
             "feedback": (
-                f"Você usou {exclam} '!' na resposta. Soa robótico/forçado. "
-                "Reduz pra no MÁXIMO 1. Use '!' SÓ em emoção real (lead fechou compra, "
-                "novidade legal). Resto: nada, vírgula, ou reticências."
+                f"Você usou {exclam} '!' na resposta. Soa entusiasmado-forçado de bot. "
+                "REDUZ pra ZERO ou MÁXIMO 1. Use '!' SÓ em emoção real (lead fechou compra). "
+                "Resto: nada, vírgula, ou reticências. Humano WhatsApp raramente usa '!'."
             ),
             "severity": "warning",
         }
@@ -627,6 +675,12 @@ async def review_reply(
     if punct_review:
         log.info("[supervisor] pontuação rejeitou: %s", punct_review["reason"])
         return punct_review
+
+    # Fail-fast: frases batidas tipo "como posso te ajudar"
+    canned_review = _check_canned_phrases(proposed_reply)
+    if canned_review:
+        log.info("[supervisor] frase batida rejeitou: %s", canned_review["reason"])
+        return canned_review
 
     # Fail-fast: mensagem comprida/emendada (anti-humano)
     length_review = _check_length(proposed_reply)
