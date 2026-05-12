@@ -56,9 +56,30 @@ def _resolve_ext(mime: str) -> str:
     return _MIME_TO_EXT.get(base, "ogg")
 
 
-def _resolve_api_key() -> str:
-    """OPENAI_API_KEY tem prioridade. Fallback OPENROUTER_API_KEY (suporte parcial)."""
-    return (os.getenv("OPENAI_API_KEY") or os.getenv("OPENROUTER_API_KEY") or "").strip()
+def _resolve_endpoint_and_key() -> tuple[str, str]:
+    """
+    Detecta provider + URL correta baseado em qual key está setada.
+
+    Prioridade:
+      1. WHISPER_API_URL env explícito (user override) + qualquer key
+      2. OPENAI_API_KEY → api.openai.com/v1/audio/transcriptions (oficial)
+      3. OPENROUTER_API_KEY → openrouter.ai/api/v1/audio/transcriptions
+         (OpenRouter pode não suportar — fallback graceful)
+
+    Returns: (url, api_key) ou ("", "") se nenhum key.
+    """
+    explicit_url = os.getenv("WHISPER_API_URL", "").strip()
+    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+    router_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+
+    if openai_key:
+        url = explicit_url or "https://api.openai.com/v1/audio/transcriptions"
+        return (url, openai_key)
+    if router_key:
+        # OpenRouter pode proxy Whisper se mesmo path. Default endpoint OpenRouter.
+        url = explicit_url or "https://openrouter.ai/api/v1/audio/transcriptions"
+        return (url, router_key)
+    return ("", "")
 
 
 async def transcribe_audio(base64_data: str, mime: str) -> str | None:
@@ -75,8 +96,8 @@ async def transcribe_audio(base64_data: str, mime: str) -> str | None:
     if not base64_data or not mime:
         return None
 
-    api_key = _resolve_api_key()
-    if not api_key:
+    api_url, api_key = _resolve_endpoint_and_key()
+    if not api_key or not api_url:
         log.warning("[whisper] sem OPENAI_API_KEY/OPENROUTER_API_KEY — skip transcrição")
         return None
 
@@ -104,7 +125,7 @@ async def transcribe_audio(base64_data: str, mime: str) -> str | None:
     try:
         async with httpx.AsyncClient(timeout=WHISPER_TIMEOUT) as client:
             r = await client.post(
-                WHISPER_API_URL,
+                api_url,
                 headers={"Authorization": f"Bearer {api_key}"},
                 files=files,
                 data=data,
