@@ -1080,7 +1080,10 @@ async def webhook_reset_admin(request: Request) -> dict:
         raise HTTPException(status_code=400, detail="password obrigatório (>= 6 chars)")
 
     sb_url = (os.getenv("SUPABASE_URL") or "").rstrip("/")
-    sb_key = (os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY") or "").strip()
+    # SECURITY: SERVICE_KEY only — ANON_KEY não deve poder escrever em admin_users.
+    # Se ANON_KEY tivesse esse poder, leak da ANON_KEY (que pode ser exposta no
+    # frontend em alguns setups) daria controle total ao bot.
+    sb_key = (os.getenv("SUPABASE_SERVICE_KEY") or "").strip()
     if not sb_url or not sb_key:
         raise HTTPException(status_code=503, detail="SUPABASE_URL/SUPABASE_SERVICE_KEY ausentes")
 
