@@ -861,6 +861,12 @@ async def create_flow(
         "steps":       body.get("steps") or [],
         "enabled":     body.get("enabled", True),
     })
+    # Invalida cache do agent/flows.py — bot precisa enxergar flow novo imediatamente
+    try:
+        from agent.flows import invalidate_flows_cache
+        invalidate_flows_cache(project_id)
+    except Exception:
+        pass
     await _audit(user, "flow.create", "flow", str(row.get("id", "")), name=name, project_id=project_id)
     return {"ok": True, "flow": row}
 
@@ -874,6 +880,13 @@ async def patch_flow(
     allowed = {"name", "description", "steps", "enabled"}
     payload = {k: v for k, v in body.items() if k in allowed}
     row = await _flows_repo.patch(flow_id, payload)
+    # Cache invalidate — flow editado deve refletir imediatamente
+    try:
+        from agent.flows import invalidate_flows_cache
+        project_id = row.get("project_id") if isinstance(row, dict) else None
+        invalidate_flows_cache(project_id)
+    except Exception:
+        pass
     await _audit(user, "flow.patch", "flow", flow_id, fields=list(payload.keys()))
     return {"ok": True, "flow": row}
 
@@ -884,6 +897,12 @@ async def delete_flow(
     user: Annotated[dict[str, Any], Depends(require_admin)],
 ) -> dict[str, Any]:
     ok = await _flows_repo.delete(flow_id)
+    # Cache invalidate global (não temos project_id do flow_id deletado sem fetch)
+    try:
+        from agent.flows import invalidate_flows_cache
+        invalidate_flows_cache(None)
+    except Exception:
+        pass
     await _audit(user, "flow.delete", "flow", flow_id)
     return {"ok": ok}
 

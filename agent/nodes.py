@@ -1379,7 +1379,13 @@ async def flow_executor_node(state: SalesState) -> dict[str, Any]:
             # Não derruba o grafo — segue pro próximo step.
             continue
 
-    return {"flow_dispatched": True, "sent": sent > 0, "sent_count": sent}
+    # Fallback: se NADA enviou (todos steps falharam), NÃO marca dispatched.
+    # send_node então usa chunks normais do specialist como backup → lead não fica
+    # em silêncio quando flow falha (Evolution down, URL inválida etc).
+    if sent == 0:
+        log.warning("[flow] %s/%s todos steps falharam — fallback pros chunks", instance, to)
+        return {"flow_dispatched": False, "sent": False, "sent_count": 0, "flow_name": None}
+    return {"flow_dispatched": True, "sent": True, "sent_count": sent}
 
 
 # ────────────────────────────────────────────────────────────────────

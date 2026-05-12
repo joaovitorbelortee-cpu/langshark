@@ -58,26 +58,20 @@ QUEUE_MAX_STALE_SECONDS = int(os.getenv("QUEUE_MAX_STALE_SECONDS", "300"))
 QUEUE_POLL_INTERVAL_S = float(os.getenv("QUEUE_POLL_INTERVAL_S", "0.5"))
 
 # ────── Smart Inter-message Delay (anti-ban gaussian) ──────
-# Pausa entre msgs do bot (não entre leads específicos — bot revezando).
-# Research-based (baileys-antiban + green-api + chatarmin 2025-2026):
-#   - Mínimo 45s entre msgs pra leads diferentes (NUNCA furar)
-#   - Gaussian jitter > uniform (padrão temporal humano)
-#   - Adaptativo por carga (queue size):
-#     calmo (0-2)   → mean=110s std=25s [75, 150]
-#     normal (3-5)  → mean=85s  std=20s [60, 120]
-#     pico (6+)     → mean=65s  std=15s [45, 90]
-#   - HOT lane (lead fechando): mean=60s std=12s [45, 75]
+# Pausa entre msgs do bot pra leads DIFERENTES (bot revezando).
+# User override: 1-2 min max por lead. Faixa clampada [60, 120] todos profiles.
+# Gaussian jitter mantido pra padrão temporal humano. Min 60s ainda anti-ban-safe.
 INTER_LEAD_DELAY_ENABLED = os.getenv("INTER_LEAD_DELAY_ENABLED", "1") == "1"
 
 # Threshold de carga (inclui inbox + queue)
 SCHED_LOW_THRESHOLD = int(os.getenv("SCHED_LOW_THRESHOLD", "2"))
 SCHED_HIGH_THRESHOLD = int(os.getenv("SCHED_HIGH_THRESHOLD", "5"))
 
-# Gaussian: (mean, stddev, hard_min, hard_max). Min sempre >= 45s research-based.
-SCHED_DELAY_CALM = (110.0, 25.0, 75.0, 150.0)
-SCHED_DELAY_NORMAL = (85.0, 20.0, 60.0, 120.0)
-SCHED_DELAY_PEAK = (65.0, 15.0, 45.0, 90.0)
-SCHED_DELAY_HOT = (60.0, 12.0, 45.0, 75.0)
+# Gaussian: (mean, stddev, hard_min, hard_max). User: 60-120s todos profiles.
+SCHED_DELAY_CALM = (105.0, 15.0, 60.0, 120.0)
+SCHED_DELAY_NORMAL = (90.0, 12.0, 60.0, 120.0)
+SCHED_DELAY_PEAK = (75.0, 10.0, 60.0, 110.0)
+SCHED_DELAY_HOT = (65.0, 8.0, 60.0, 90.0)
 
 # Estágios que entram em HOT lane (lead quente, prioridade)
 HOT_STAGES = {"preco", "fechamento"}

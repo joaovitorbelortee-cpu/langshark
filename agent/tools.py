@@ -429,11 +429,12 @@ class EvolutionClient:
 # ────────────────────────────────────────────────────────────────────
 
 def typing_delay_ms(text: str, cps_base: float = 3.0) -> int:
-    """Calcula quantos ms de typing antes de enviar o chunk."""
+    """Calcula quantos ms de typing antes de enviar o chunk.
+    User override: clamp [5000, 15000] — bot dentro da conversa só tem typing 5-15s."""
     chars = len(text)
     cps = max(2.0, min(9.0, cps_base * random.uniform(0.8, 1.2)))
     base = (chars / cps) * 1000
-    return int(min(12000, max(1500, base * random.uniform(0.8, 1.2))))
+    return int(min(15000, max(5000, base * random.uniform(0.8, 1.2))))
 
 
 def jitter_between_bubbles_ms() -> int:

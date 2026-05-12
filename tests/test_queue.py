@@ -171,14 +171,14 @@ async def test_dequeue_malformed_returns_none():
 # ────────────────────────────────────────────────────────────────────
 
 def test_inter_lead_delay_low_load(monkeypatch):
-    """Queue calma (0-2) → gaussian 75-150s."""
+    """Queue calma (0-2) → gaussian 60-120s (user override 1-2 min max)."""
     monkeypatch.setenv("WEBHOOK_SECRET", "x" * 32)
     from main import _calc_inter_lead_delay
     for _ in range(20):
         d = _calc_inter_lead_delay(qsize=0)
-        assert 75 <= d <= 150, f"qsize=0 esperado 75-150, got {d}"
+        assert 60 <= d <= 120, f"qsize=0 esperado 60-120, got {d}"
         d = _calc_inter_lead_delay(qsize=2)
-        assert 75 <= d <= 150, f"qsize=2 esperado 75-150, got {d}"
+        assert 60 <= d <= 120, f"qsize=2 esperado 60-120, got {d}"
 
 
 def test_inter_lead_delay_normal_load(monkeypatch):
@@ -193,25 +193,25 @@ def test_inter_lead_delay_normal_load(monkeypatch):
 
 
 def test_inter_lead_delay_high_load(monkeypatch):
-    """Queue pico (6+) → gaussian 45-90s (acelera mas NUNCA fura mínimo 45s)."""
+    """Queue pico (6+) → gaussian 60-110s (clampado 60s min)."""
     monkeypatch.setenv("WEBHOOK_SECRET", "x" * 32)
     from main import _calc_inter_lead_delay
     for _ in range(20):
         d = _calc_inter_lead_delay(qsize=6)
-        assert 45 <= d <= 90, f"qsize=6 esperado 45-90, got {d}"
+        assert 60 <= d <= 110, f"qsize=6 esperado 60-110, got {d}"
         d = _calc_inter_lead_delay(qsize=20)
-        assert 45 <= d <= 90, f"qsize=20 esperado 45-90, got {d}"
+        assert 60 <= d <= 110, f"qsize=20 esperado 60-110, got {d}"
 
 
 def test_inter_lead_delay_hot_lane(monkeypatch):
-    """HOT lane (lead fechando) → gaussian 45-75s mesmo no pico."""
+    """HOT lane (lead fechando) → gaussian 60-90s."""
     monkeypatch.setenv("WEBHOOK_SECRET", "x" * 32)
     from main import _calc_inter_lead_delay
     for _ in range(20):
         d = _calc_inter_lead_delay(qsize=0, hot=True)
-        assert 45 <= d <= 75, f"hot calmo esperado 45-75, got {d}"
+        assert 60 <= d <= 90, f"hot calmo esperado 60-90, got {d}"
         d = _calc_inter_lead_delay(qsize=20, hot=True)
-        assert 45 <= d <= 75, f"hot pico esperado 45-75, got {d}"
+        assert 60 <= d <= 90, f"hot pico esperado 60-90, got {d}"
 
 
 def test_inter_lead_delay_randomized(monkeypatch):
