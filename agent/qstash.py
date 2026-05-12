@@ -62,8 +62,14 @@ class QStashClient:
         if not self.enabled:
             return {"ok": False, "skipped": True, "reason": "qstash not configured"}
 
-        # Clamp seguro (igual ao bot antigo: min 5, max 10080)
-        delay_minutes = max(5, min(10080, int(delay_minutes)))
+        # Clamp seguro: min 1min (lead diz "em 3 min"), max 7 dias.
+        # QStash suporta Upstash-Delay em segundos também via formato "30s".
+        delay_minutes = max(1, min(10080, int(delay_minutes)))
+
+        # Quando dispara, QStash POST pro target. Pra autenticar, forward o
+        # WEBHOOK_SECRET como header `apikey` (formato que _check_auth aceita).
+        # QSTASH_TOKEN não serve aqui — é credencial DO QStash, não do nosso bot.
+        webhook_secret = os.getenv("WEBHOOK_SECRET", "").strip()
 
         target = f"{self.target_base}/api/trigger-followup"
         payload = {
@@ -73,16 +79,20 @@ class QStashClient:
             "push_name": push_name,
         }
 
+        headers = {
+            "Authorization": f"Bearer {self.token}",  # auth pra publicar no QStash
+            "Content-Type": "application/json",
+            "Upstash-Delay": f"{delay_minutes}m",
+        }
+        # Forward apikey pro trigger-followup endpoint (auth nossa)
+        if webhook_secret:
+            headers["Upstash-Forward-apikey"] = webhook_secret
+
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 r = await client.post(
                     f"{self.base_url}/v2/publish/{target}",
-                    headers={
-                        "Authorization": f"Bearer {self.token}",
-                        "Content-Type": "application/json",
-                        "Upstash-Delay": f"{delay_minutes}m",
-                        "Upstash-Forward-Authorization": f"Bearer {self.token}",
-                    },
+                    headers=headers,
                     json=payload,
                 )
                 r.raise_for_status()
