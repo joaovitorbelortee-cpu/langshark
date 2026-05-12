@@ -91,6 +91,14 @@ def _extract_keywords_from_description(description: str) -> list[str]:
         "quando", "como", "onde", "qual", "quem", "quanto", "porque",
         "muito", "pouco", "bem", "mal", "sim", "nao", "talvez",
         "lead", "cliente", "ia", "bot", "usuario", "user", "no", "all",
+        # commons que inflam false-positives:
+        "primeira", "vez", "todo", "todos", "toda", "todas", "vezes",
+        "melhor", "pior", "maior", "menor", "novo", "nova",
+        "gostaria", "interessado", "interessada", "querer", "quero",
+        "fazer", "feito", "feita", "dizer", "falar", "saber",
+        "minha", "meu", "seu", "sua", "nosso", "nossa",
+        "aqui", "ali", "agora", "depois", "antes", "hoje", "amanha",
+        "apenas", "somente", "ainda", "sempre", "nunca", "qualquer",
     }
     words = [w for w in norm.split() if len(w) >= 4 and w not in stopwords]
     return words
@@ -118,7 +126,11 @@ def _stage1_keyword_match(
         if not keywords:
             continue
         matches = sum(1 for kw in keywords if kw in user_words)
-        if matches >= 2 and matches > best_score:
+        # Threshold: pelo menos 3 keywords match OU 50% das keywords + min 2
+        # (subido de 2 absolute pra evitar false positives quando descrição é longa)
+        kw_count = len(keywords)
+        min_match = max(3, min(int(kw_count * 0.5), kw_count))
+        if matches >= min_match and matches > best_score:
             best_score = matches
             best_flow = flow.name
     return best_flow

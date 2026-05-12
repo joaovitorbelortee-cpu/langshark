@@ -723,14 +723,18 @@ async def flow_router_node(state: SalesState) -> dict[str, Any]:
     Skip:
       - intent=comprou (sem reply)
       - intent=follow_up (bot iniciando, sem msg user nova)
+
+    CRÍTICO: SEMPRE retorna flow_name=None se não decidir, pra LIMPAR estado
+    de turn anterior (evita stale flow_name re-disparar errado).
     """
     intent = state.get("intent") or ""
     if intent in ("comprou", "follow_up"):
-        return {}
+        # Limpa flow_name herdado pra não disparar em turn errado
+        return {"flow_name": None}
 
     user_msg = state.get("user_message") or ""
     if not user_msg.strip():
-        return {}
+        return {"flow_name": None}
 
     from agent.flow_router import route_flow
 
@@ -742,17 +746,25 @@ async def flow_router_node(state: SalesState) -> dict[str, Any]:
         )
     except Exception as exc:  # noqa: BLE001
         log.warning("[flow_router_node] erro: %s", exc)
-        return {}
+        return {"flow_name": None}
 
     if not decision.flow_name:
-        return {}
+        # Importante: limpa flow_name anterior pra não vazar
+        return {"flow_name": None}
 
-    # Marca flow_name no state — graph route vai pro flow_executor
+    # Valida flow ainda existe (anti-stale após delete) + retorna nome canônico
+    from agent.flows import get_flow
+    flow = get_flow(state.get("project_id", "padrao"), decision.flow_name)
+    if not flow:
+        log.warning("[flow_router_node] flow %s não encontrado — fallback specialist", decision.flow_name)
+        return {"flow_name": None}
+
     log.info(
         "[flow_router_node] disparado flow=%s confidence=%s reason=%s",
-        decision.flow_name, decision.confidence, decision.reason,
+        flow.name, decision.confidence, decision.reason,
     )
-    return {"flow_name": decision.flow_name}
+    # Usa nome canônico do flow (não o retornado pelo LLM, evita case mismatch)
+    return {"flow_name": flow.name}
 
 
 # ────────────────────────────────────────────────────────────────────

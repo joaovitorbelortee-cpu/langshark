@@ -262,6 +262,12 @@ _PRICE_PATTERNS = [
     re.compile(r"\bprivad[ao]\b", re.IGNORECASE),        # plano privado
     re.compile(r"\d+\s*(meses|mês|mes)\b", re.IGNORECASE),  # 3 meses
     re.compile(r"\bplano de\s*\d", re.IGNORECASE),       # "plano de 40"
+    re.compile(r"\b\d{2,3}\s*reais\b", re.IGNORECASE),   # "40 reais", "80 reais"
+    re.compile(r"\bquarenta\s+reais\b", re.IGNORECASE),  # "quarenta reais" extenso
+    re.compile(r"\boitenta\s+reais\b", re.IGNORECASE),
+    re.compile(r"\bdez\s+reais\b", re.IGNORECASE),
+    re.compile(r"\bsessenta\s+reais\b", re.IGNORECASE),
+    re.compile(r"\bvinte\s+reais\b", re.IGNORECASE),
 ]
 
 _PAYMENT_LINK_PATTERN = re.compile(
@@ -357,10 +363,13 @@ def _check_punctuation(proposed: str) -> dict[str, Any] | None:
             ),
             "severity": "warning",
         }
-    # Conta sentences terminando em "."
+    # Conta sentences terminando em "." (ignora ellipsis "..." que é casual humano)
     sentences = [s.strip() for s in re.split(r"\n+|(?<=[.!?])\s+", proposed) if s.strip()]
     if len(sentences) >= 3:
-        dot_endings = sum(1 for s in sentences if s.endswith("."))
+        dot_endings = sum(
+            1 for s in sentences
+            if s.endswith(".") and not s.endswith("...")  # exclui reticências
+        )
         ratio = dot_endings / len(sentences)
         if ratio >= _PERIOD_AT_END_LIMIT:
             return {
@@ -374,6 +383,70 @@ def _check_punctuation(proposed: str) -> dict[str, Any] | None:
                 ),
                 "severity": "warning",
             }
+    return None
+
+
+# Limites de comprimento por mensagem (WhatsApp humano = curto)
+_MAX_TOTAL_CHARS = 600       # reply inteiro acima disso = mensagem-livro
+_MAX_SINGLE_SENTENCE = 180   # frase única > 180 chars = compridona
+_MAX_SENTENCES_NO_BREAK = 3  # >3 frases sem quebra de linha = parágrafo emendado
+
+
+def _check_length(proposed: str) -> dict[str, Any] | None:
+    """
+    Detecta mensagem comprida/emendada (anti-humanização):
+      - total > 600 chars
+      - alguma frase única > 180 chars
+      - 3+ frases sem quebra de linha (emendado em parágrafo)
+
+    Bot WhatsApp deve enviar 1-3 bolhas CURTAS. Sistema chunk_for_whatsapp
+    já fragmenta, mas se reply chegar gigantesco, fica parágrafo monstro.
+    """
+    if not proposed or len(proposed) < 50:
+        return None
+
+    total = len(proposed)
+    if total > _MAX_TOTAL_CHARS:
+        return {
+            "approved": False,
+            "reason": f"resposta gigantesca ({total} chars)",
+            "feedback": (
+                f"Sua resposta tem {total} caracteres. WhatsApp real ninguém manda "
+                "texto-livro. CORTE: mantém o ESSENCIAL em 1-3 frases curtas. "
+                "Termina com pergunta pra cliente responder. Resto deixa pro próximo turn."
+            ),
+            "severity": "warning",
+        }
+
+    # Sentences split (não corta abreviações)
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", proposed) if s.strip()]
+    for s in sentences:
+        if len(s) > _MAX_SINGLE_SENTENCE:
+            return {
+                "approved": False,
+                "reason": f"frase única gigante ({len(s)} chars)",
+                "feedback": (
+                    f"Você fez uma frase de {len(s)} chars sem cortar. Humano quebra "
+                    "em mais de uma. PARTA em 2-3 frases curtas. Ex em vez de "
+                    "'Olha, pra você que joga no PC ou Console o melhor plano que cobre "
+                    "tudo seria a compartilhada de 3 meses' use 'pra PC/Console rola "
+                    "compartilhada. R$40 por 3 meses. quer ver mais detalhe?'"
+                ),
+                "severity": "warning",
+            }
+
+    # Parágrafo emendado: várias frases SEM \n no meio
+    if len(sentences) > _MAX_SENTENCES_NO_BREAK and "\n" not in proposed:
+        return {
+            "approved": False,
+            "reason": f"{len(sentences)} frases emendadas sem quebra",
+            "feedback": (
+                f"Você emendou {len(sentences)} frases num parágrafo só. WhatsApp humano "
+                "QUEBRA em msgs separadas. Use \\n pra dividir, OU corte pra 2-3 "
+                "ideias maximo. Lead lê melhor msgs curtas."
+            ),
+            "severity": "warning",
+        }
     return None
 
 
@@ -466,7 +539,8 @@ def _check_compriou_fraud(
             "severity": "critical",
         }
 
-    # Checa últimas msgs do CLIENTE — alguma indica pagamento?
+    # Checa APENAS as ÚLTIMAS 2 msgs do cliente — evidência precisa ser RECENTE.
+    # Imagem antiga (3+ turnos atrás) NÃO conta como prova de pagamento atual.
     keywords_payment = (
         "paguei", "pago", "pix feito", "transferi", "comprovante",
         "pagamento feito", "ja paguei", "acabei de pagar", "fiz o pix",
@@ -478,12 +552,12 @@ def _check_compriou_fraud(
             content = getattr(m, "content", "")
             if isinstance(content, str) and content.strip():
                 last_user_msgs.append(content.lower())
-                if len(last_user_msgs) >= 5:
+                if len(last_user_msgs) >= 2:
                     break
             elif isinstance(content, list):
                 # Multimodal (imagem) — é evidência de comprovante potencial
                 last_user_msgs.append("[imagem]")
-                if len(last_user_msgs) >= 5:
+                if len(last_user_msgs) >= 2:
                     break
 
     has_payment_signal = any(
@@ -553,6 +627,12 @@ async def review_reply(
     if punct_review:
         log.info("[supervisor] pontuação rejeitou: %s", punct_review["reason"])
         return punct_review
+
+    # Fail-fast: mensagem comprida/emendada (anti-humano)
+    length_review = _check_length(proposed_reply)
+    if length_review:
+        log.info("[supervisor] comprimento rejeitou: %s", length_review["reason"])
+        return length_review
 
     convo = _conversation_to_text(messages)
     facts_str = json.dumps(lead_facts or {}, ensure_ascii=False, indent=2)

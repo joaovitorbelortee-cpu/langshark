@@ -40,6 +40,7 @@ FLOW_REGISTRY: dict[str, dict[str, Flow]] = {}
 # Cache do Supabase: {project_id: ({name_lower: Flow}, expires_at)}
 _SUPA_CACHE: dict[str, tuple[dict[str, Flow], float]] = {}
 _SUPA_CACHE_TTL = 60.0  # 60s — flux novo aparece em <1min sem reiniciar
+_SUPA_CACHE_MAX_PROJECTS = 100  # Hard cap pra evitar growth multi-tenant
 
 
 def register_flow(project_id: str, flow: Flow) -> None:
@@ -64,8 +65,9 @@ def _supabase_fetch_flows(project_id: str) -> dict[str, Flow]:
                     "enabled": "eq.true",
                 },
                 headers={
+                    # apikey é suficiente — Supabase REST aceita esse header
+                    # sem precisar duplicar como Authorization Bearer
                     "apikey": key,
-                    "Authorization": f"Bearer {key}",
                 },
             )
             if not r.is_success:
@@ -101,6 +103,10 @@ def _get_supa_flows(project_id: str) -> dict[str, Flow]:
         return cached[0]
     fresh = _supabase_fetch_flows(pid)
     if fresh or not cached:
+        # LRU eviction: se cache lotado, remove entry mais antiga
+        if len(_SUPA_CACHE) >= _SUPA_CACHE_MAX_PROJECTS and pid not in _SUPA_CACHE:
+            oldest_key = min(_SUPA_CACHE, key=lambda k: _SUPA_CACHE[k][1])
+            _SUPA_CACHE.pop(oldest_key, None)
         _SUPA_CACHE[pid] = (fresh, now + _SUPA_CACHE_TTL)
         return fresh
     # Fetch falhou mas tem cache stale — usa stale (gracefulness)

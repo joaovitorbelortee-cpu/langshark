@@ -468,6 +468,13 @@ async def _run_graph_streaming(initial_state: dict, thread_id: str) -> dict:
 # Endpoint principal
 # ────────────────────────────────────────────────────────────────────
 
+def _redact_phone(phone: str) -> str:
+    """Privacy: log apenas últimos 4 dígitos (LGPD/GDPR compliance)."""
+    if not phone or len(phone) < 4:
+        return "***"
+    return f"***{phone[-4:]}"
+
+
 @app.post("/webhook/evolution")
 @app.post("/webhook")
 @limiter.limit("60/minute")
@@ -516,7 +523,7 @@ async def webhook(request: Request) -> dict:
 
     remote_jid: str = key.get("remoteJid") or ""
     if remote_jid.endswith("@g.us") or "@broadcast" in remote_jid:
-        log.info("[webhook] skip group/broadcast jid=%s", remote_jid)
+        log.info("[webhook] skip group/broadcast jid=%s", _redact_phone(remote_jid))
         return {"ok": True, "skipped": "group/broadcast"}
 
     phone = remote_jid.replace("@s.whatsapp.net", "").replace("@g.us", "")
