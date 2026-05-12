@@ -154,6 +154,108 @@ def _conversation_to_text(messages: list[BaseMessage], limit: int = 20) -> str:
     return "\n".join(lines) or "(conversa vazia)"
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Anti-repetição programática (fail-fast SEM LLM)
+# ──────────────────────────────────────────────────────────────────────
+
+def _normalize_for_compare(text: str) -> str:
+    """Lowercase + remove pontuação/espaços extras pra comparar conteúdo."""
+    if not isinstance(text, str):
+        return ""
+    t = text.lower()
+    t = re.sub(r"[^\w\sáéíóúâêîôûãõçà]", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def _word_set(text: str) -> set[str]:
+    """Tokens >= 3 chars (evita stopwords pegando 1-2 char)."""
+    return {w for w in _normalize_for_compare(text).split() if len(w) >= 3}
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    inter = a & b
+    union = a | b
+    return len(inter) / len(union) if union else 0.0
+
+
+def _check_repetition(proposed: str, messages: list[BaseMessage], lookback: int = 4) -> dict[str, Any] | None:
+    """
+    Compara `proposed` com últimas N AIMessages do histórico. Se overlap alto =
+    repetição → reject.
+
+    CRITICAL: pula a PRIMEIRA AIMessage encontrada (de trás pra frente). Quando
+    supervisor roda, o especialista já appended o proposed no state.messages.
+    Não comparar com ele mesmo (self-match 100% causa reject infinito).
+
+    Thresholds:
+      - jaccard >= 0.55 (>55% palavras em comum) → CRITICAL
+      - jaccard >= 0.40 → WARNING
+    """
+    if not proposed or not isinstance(proposed, str):
+        return None
+    new_set = _word_set(proposed)
+    if len(new_set) < 4:
+        return None  # frase muito curta, comparação não confiável
+
+    proposed_norm = _normalize_for_compare(proposed)
+
+    # Últimas N AIMessages — PULA a primeira encontrada se for igual ao proposed
+    # (LLM já appended a msg no state antes do supervisor rodar)
+    ai_msgs: list[str] = []
+    skipped_self = False
+    for m in reversed(messages or []):
+        if getattr(m, "type", "") == "ai":
+            content = getattr(m, "content", "")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            # Pula auto-match (primeiro AIMessage idêntico ao proposed)
+            if not skipped_self and _normalize_for_compare(content) == proposed_norm:
+                skipped_self = True
+                continue
+            ai_msgs.append(content)
+            if len(ai_msgs) >= lookback:
+                break
+    if not ai_msgs:
+        return None
+
+    max_score = 0.0
+    matched_text = ""
+    for prev in ai_msgs:
+        score = _jaccard(new_set, _word_set(prev))
+        if score > max_score:
+            max_score = score
+            matched_text = prev
+
+    if max_score >= 0.55:
+        return {
+            "approved": False,
+            "reason": f"repetição forte ({max_score:.0%}) de msg anterior",
+            "feedback": (
+                "Você está REPETINDO uma frase quase idêntica que já mandou. "
+                "Mude completamente as palavras E o ângulo. Cliente já leu o ponto antes; "
+                "se for insistir, AVANCE no estágio (ex: dê alternativa, mude abordagem) "
+                "ou pare de pedir a mesma coisa. Resposta anterior similar: "
+                f"\"{matched_text[:120]}\""
+            ),
+            "severity": "critical",
+        }
+    if max_score >= 0.40:
+        return {
+            "approved": False,
+            "reason": f"eco moderado ({max_score:.0%}) de msg anterior",
+            "feedback": (
+                "Sua resposta tem palavras demais em comum com uma anterior. "
+                "Reescreva mudando estrutura E vocabulário. Não repita o mesmo pedido "
+                "do mesmo jeito — varie completamente."
+            ),
+            "severity": "warning",
+        }
+    return None
+
+
 async def review_reply(
     proposed_reply: str,
     messages: list[BaseMessage],
@@ -171,6 +273,12 @@ async def review_reply(
 
     if not proposed_reply or not proposed_reply.strip():
         return {"approved": False, "reason": "reply vazia", "feedback": "Escreva uma resposta.", "severity": "warning"}
+
+    # Fail-fast: repetição programática (sem custo LLM)
+    rep_review = _check_repetition(proposed_reply, messages or [])
+    if rep_review:
+        log.info("[supervisor] anti-repetição rejeitou: %s", rep_review["reason"])
+        return rep_review
 
     convo = _conversation_to_text(messages)
     facts_str = json.dumps(lead_facts or {}, ensure_ascii=False, indent=2)
