@@ -314,10 +314,18 @@ def _validate_decision(
             "killswitch_permanent": True,
         }
 
-    # Escalação por tentativas (já tem 3+ followups → multiplica e força VALOR)
-    if attempts_made >= 3 and temp not in ("STOP", "HOT", "SCHEDULED"):
-        minutos = int(minutos * 2) if minutos else 240
-        abordagem = "valor"
+    # Escalação por tentativas (já tem 3+ followups → multiplica e força VALOR).
+    # Inclui SCHEDULED com cadência curta (<= 60min) — lead pediu "em 3 min" mas
+    # silenciou 3+ vezes? Cadência curta vira spam. Promove pra WARM range.
+    if attempts_made >= 3:
+        if temp == "SCHEDULED" and minutos <= 60:
+            # Lead silenciou 3+ vezes após pedir cadência curta → cadência caducou
+            temp = "WARM"
+            abordagem = "valor"
+            minutos = 0  # zero pra clamp WARM aplicar default 90
+        elif temp not in ("STOP", "HOT", "SCHEDULED"):
+            minutos = int(minutos * 2) if minutos else 240
+            abordagem = "valor"
 
     # Clamps por temperatura
     if temp == "HOT":

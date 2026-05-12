@@ -98,3 +98,9 @@ class SalesState(TypedDict):
 
     # Batch coalescing — quantas msgs do user foram juntadas neste turno (>=2 = rajada)
     batch_size: NotRequired[int]
+
+    # Vision pending: HumanMessage multimodal (text + image_url) gerada por vision_node.
+    # NÃO vai pro add_messages reducer (não persiste no checkpoint) — consumed local
+    # pelos especialistas substituindo última HumanMessage no LLM call.
+    # Evita "recebi a mídia" ficar eterno no histórico após persist.
+    vision_msg: NotRequired[Any]

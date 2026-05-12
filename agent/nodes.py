@@ -755,7 +755,8 @@ async def respond_node(state: SalesState) -> dict[str, Any]:
     )
 
     messages: list[Any] = [SystemMessage(content=system_prompt)]
-    messages.extend(state.get("messages", []))
+    # Vision: substitui última HumanMessage por multimodal LOCAL (não persiste)
+    messages.extend(_inject_vision_into_history(state.get("messages", []), state.get("vision_msg")))
 
     llm = _make_llm_with_tools(**_llm_kwargs_from_state(state, default_temp=0.7, default_max=600))
     res = await llm.ainvoke(messages)
@@ -772,6 +773,8 @@ async def respond_node(state: SalesState) -> dict[str, Any]:
         "has_converted": parsed.has_converted,
         "schedule_minutes": parsed.schedule_minutes,
         "react_emoji": parsed.react_emoji,
+        # Limpa vision_msg após uso pra não vazar em retries do supervisor
+        "vision_msg": None,
         "quote_previous": parsed.quote_previous,
         "messages": [AIMessage(content=cleaned_text)],
     }
@@ -829,7 +832,7 @@ async def close_sale_node(state: SalesState) -> dict[str, Any]:
     )
 
     messages: list[Any] = [SystemMessage(content=system)]
-    messages.extend(state.get("messages", []))
+    messages.extend(_inject_vision_into_history(state.get("messages", []), state.get("vision_msg")))
 
     llm = _make_llm(**_llm_kwargs_from_state(state, default_temp=0.5, default_max=400))
     res = await llm.ainvoke(messages)
@@ -844,6 +847,7 @@ async def close_sale_node(state: SalesState) -> dict[str, Any]:
         "schedule_minutes": parsed.schedule_minutes,
         "react_emoji": parsed.react_emoji,
         "quote_previous": parsed.quote_previous,
+        "vision_msg": None,  # limpa após uso
         "messages": [AIMessage(content=cleaned_text)],
     }
     if flow_name and get_flow(state["project_id"], flow_name):
@@ -945,32 +949,65 @@ def _vision_instruction(mime: str | None) -> str:
 
 async def vision_node(state: SalesState) -> dict[str, Any]:
     """
-    Quando há mídia base64, substitui a última HumanMessage por uma multi-modal
-    (text + image_url no formato OpenAI vision). Sem chamada extra de LLM — só
-    enriquece a mensagem que respond/close_sale vão consumir.
+    Quando há mídia base64, gera HumanMessage multimodal (text + image_url) e
+    grava em `state.vision_msg`. Especialistas (respond/close_sale/_run_specialist)
+    consomem localmente, substituindo última HumanMessage no LLM call.
+
+    CRITICAL: NÃO persiste a multimodal no `state.messages` (via add_messages).
+    Se persistisse, o checkpoint guardaria image_url eterno e turns futuros (ex:
+    follow-up) leriam isso → bot diria "recebi a mídia" sem ter recebido.
+
+    Pula áudio: OpenAI vision aceita SÓ image. Áudio precisa Whisper transcription
+    (não implementado) — passa direto pro LLM com placeholder textual.
     """
     mime = state.get("media_mime")
     b64 = state.get("media_base64")
     if not mime or not b64:
         return {}
 
+    # OpenAI vision aceita apenas imagens. Áudio/vídeo/doc: usa só instrução text,
+    # sem image_url (evita BadRequestError "Only image types are supported").
+    kind = mime.split("/")[0]
+    is_image = kind == "image"
+
     instruction = _vision_instruction(mime)
     caption_text = state.get("user_message") or ""
     text_part = f"{instruction}\n\nLegenda do cliente: \"{caption_text}\"" if caption_text else instruction
-    data_url = f"data:{mime};base64,{b64}"
 
-    multimodal_user = HumanMessage(
-        content=[
-            {"type": "text", "text": text_part},
-            {"type": "image_url", "image_url": {"url": data_url}},
-        ]
-    )
+    if is_image:
+        data_url = f"data:{mime};base64,{b64}"
+        multimodal_user = HumanMessage(
+            content=[
+                {"type": "text", "text": text_part},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ]
+        )
+    else:
+        # Não-imagem: text-only HumanMessage com instrução (sem image_url pra evitar 400)
+        multimodal_user = HumanMessage(content=text_part)
 
-    # Reescreve `messages` mantendo o histórico e substituindo só a última user msg.
-    history = list(state.get("messages") or [])
-    while history and isinstance(history[-1], HumanMessage):
-        history.pop()
-    return {"messages": [*history, multimodal_user]}
+    # Grava em state.vision_msg (não persiste via add_messages — sem reducer)
+    return {"vision_msg": multimodal_user}
+
+
+def _inject_vision_into_history(
+    history: list[Any],
+    vision_msg: Any,
+) -> list[Any]:
+    """Se vision_msg setado, substitui a última HumanMessage por ele.
+    Retorna lista nova (não muta original). Pra usar no LLM call sem
+    persistir multimodal no checkpoint."""
+    if not vision_msg:
+        return list(history)
+    out = list(history)
+    # Procura última HumanMessage e substitui
+    for i in range(len(out) - 1, -1, -1):
+        if isinstance(out[i], HumanMessage):
+            out[i] = vision_msg
+            return out
+    # Nenhuma HumanMessage no histórico — append no fim
+    out.append(vision_msg)
+    return out
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -1070,7 +1107,7 @@ async def _run_specialist(
     )
 
     messages: list[Any] = [SystemMessage(content=system)]
-    messages.extend(state.get("messages", []))
+    messages.extend(_inject_vision_into_history(state.get("messages", []), state.get("vision_msg")))
 
     kwargs = _llm_kwargs_from_state(state, default_temp=temperature, default_max=max_tokens)
     llm = _make_llm(**kwargs)
@@ -1087,6 +1124,7 @@ async def _run_specialist(
         "react_emoji": parsed.react_emoji,
         "quote_previous": parsed.quote_previous,
         "messages": [AIMessage(content=cleaned_text)],
+        "vision_msg": None,  # limpa após uso
     }
     if flow_name and get_flow(state["project_id"], flow_name):
         patch["flow_name"] = flow_name
@@ -1442,19 +1480,21 @@ async def follow_up_strategist_node(state: SalesState) -> dict[str, Any]:
             "killswitch_permanent": False,
         }
 
-    # Reset SÓ em engagement real: intent forte OU temperatura HOT/SCHEDULED.
-    # Cliente respondendo "ok"/"valeu" (intent=outros) NÃO zera o counter.
-    engagement_intents = {"intencao_compra", "duvida_produto", "pedir_preco", "objecao"}
-    engagement_temps = {"HOT", "SCHEDULED"}
-    if (
-        intent in engagement_intents
-        or decision.get("temperatura") in engagement_temps
-    ):
+    # Reset SÓ em engagement intent forte. Cliente respondendo "ok"/"valeu" /
+    # emoji isolado NÃO zera o counter — LLM pode classificar temp=HOT por
+    # erro mesmo em msg trivial. Intent extraction é mais sólida que temp.
+    engagement_intents = {"intencao_compra", "duvida_produto", "pedir_preco", "objecao", "comprou"}
+    user_msg = (state.get("user_message") or "").strip()
+    # Msg substancial: mais que 5 chars e não é apenas acknowledgment
+    trivial = len(user_msg) <= 5 or user_msg.lower() in {
+        "ok", "blz", "vlw", "valeu", "vleu", "tmj", "show", "top", "👍", "👌", "✅",
+    }
+    if intent in engagement_intents and not trivial:
         try:
             await redis.reset_followup_attempts(instance, phone)
             attempts = 0
-            log.info("[strategist] reset attempts %s/%s (engagement: intent=%s temp=%s)",
-                     instance, phone, intent, decision.get("temperatura"))
+            log.info("[strategist] reset attempts %s/%s (engagement: intent=%s msg=%s)",
+                     instance, phone, intent, user_msg[:30])
         except Exception:  # noqa: BLE001
             pass
 
