@@ -256,6 +256,84 @@ def _check_repetition(proposed: str, messages: list[BaseMessage], lookback: int 
     return None
 
 
+def _check_compriou_fraud(
+    proposed: str,
+    messages: list[BaseMessage],
+    lead_facts: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """
+    Anti-fraude: bot vai mandar [COMPROU] mas não tem evidência de comprovante real?
+
+    Triggers reject:
+      - Reply tem [COMPROU] MAS lead nunca confirmou pagamento textualmente
+      - Lead estagio != fechamento (lead nem chegou nessa etapa)
+      - Última HumanMessage não foi imagem nem texto de confirmação ("paguei", "pix feito")
+
+    Retorna review reject se suspeita; None se OK.
+    """
+    if not proposed or "[COMPROU]" not in proposed.upper():
+        return None
+
+    facts = lead_facts or {}
+    estagio = (facts.get("estagio") or "").lower()
+
+    # Lead JÁ confirmou compra anteriormente? Aceita
+    if facts.get("confirmou_compra"):
+        return None
+
+    # Estágio precisa ser fechamento OU pos_venda (final do funnel)
+    if estagio not in ("fechamento", "pos_venda"):
+        return {
+            "approved": False,
+            "reason": f"[COMPROU] sem estágio fechamento (atual: {estagio or 'descoberta'})",
+            "feedback": (
+                "Você marcou [COMPROU] mas o lead nem chegou no estágio de fechamento. "
+                "REMOVA a tag [COMPROU]. Não libere produto. "
+                "Peça pra ele confirmar o pagamento antes — comprovante VÁLIDO com valor, status concluído e data."
+            ),
+            "severity": "critical",
+        }
+
+    # Checa últimas msgs do CLIENTE — alguma indica pagamento?
+    keywords_payment = (
+        "paguei", "pago", "pix feito", "transferi", "comprovante",
+        "pagamento feito", "ja paguei", "acabei de pagar", "fiz o pix",
+        "boleto pago", "feito o pagamento",
+    )
+    last_user_msgs: list[str] = []
+    for m in reversed(messages or []):
+        if getattr(m, "type", "") == "human":
+            content = getattr(m, "content", "")
+            if isinstance(content, str) and content.strip():
+                last_user_msgs.append(content.lower())
+                if len(last_user_msgs) >= 5:
+                    break
+            elif isinstance(content, list):
+                # Multimodal (imagem) — é evidência de comprovante potencial
+                last_user_msgs.append("[imagem]")
+                if len(last_user_msgs) >= 5:
+                    break
+
+    has_payment_signal = any(
+        kw in msg for msg in last_user_msgs for kw in keywords_payment
+    )
+    has_image_signal = any("[imagem]" in msg for msg in last_user_msgs)
+
+    if not has_payment_signal and not has_image_signal:
+        return {
+            "approved": False,
+            "reason": "[COMPROU] sem evidência (lead não disse 'paguei' nem mandou imagem)",
+            "feedback": (
+                "Você marcou [COMPROU] mas o lead NUNCA mandou comprovante nem disse que pagou. "
+                "REMOVA [COMPROU]. Peça o comprovante (imagem com valor, status concluído, data) "
+                "antes de liberar acesso."
+            ),
+            "severity": "critical",
+        }
+
+    return None
+
+
 async def review_reply(
     proposed_reply: str,
     messages: list[BaseMessage],
@@ -279,6 +357,12 @@ async def review_reply(
     if rep_review:
         log.info("[supervisor] anti-repetição rejeitou: %s", rep_review["reason"])
         return rep_review
+
+    # Fail-fast: tag [COMPROU] sem evidência de comprovante real
+    fraud_review = _check_compriou_fraud(proposed_reply, messages or [], lead_facts)
+    if fraud_review:
+        log.warning("[supervisor] anti-fraude COMPROU rejeitou: %s", fraud_review["reason"])
+        return fraud_review
 
     convo = _conversation_to_text(messages)
     facts_str = json.dumps(lead_facts or {}, ensure_ascii=False, indent=2)

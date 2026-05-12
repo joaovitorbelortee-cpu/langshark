@@ -928,11 +928,31 @@ async def persist_node(state: SalesState) -> dict[str, Any]:
 
 _VISION_INSTRUCTION_BY_MIME: dict[str, str] = {
     "image": (
-        "O cliente enviou uma IMAGEM. Analise o CONTEXTO da conversa antes de julgar a imagem.\n"
-        "- CASO 1 (Pagamento): se o cliente estava prestes a pagar ou disse que ia mandar o comprovante, "
-        "verifique se a imagem é um PIX/transferência/boleto autêntico (com valor, data e ID). "
-        "Se for, confirme o pagamento e adicione [COMPROU]. Se for falso/ilegível, peça o comprovante correto SEM [COMPROU].\n"
-        "- CASO 2 (Bate-papo normal): apenas comente a foto naturalmente como vendedor real e continue a conversa."
+        "O cliente enviou uma IMAGEM. PRIMEIRO classifique o que ela é, ANTES de qualquer ação.\n\n"
+        "═══ CLASSIFICAÇÃO DA IMAGEM ═══\n"
+        "Olhe a imagem e decida UM dos casos:\n\n"
+        "(A) COMPROVANTE REAL de pagamento:\n"
+        "  CHECKLIST OBRIGATÓRIO — só conte como comprovante se TODOS os itens aparecerem:\n"
+        "    1. Valor em R$ visível e legível\n"
+        "    2. Status: \"Concluído\", \"Aprovado\", \"Pagamento efetuado\", \"Comprovante\", \"Transferência realizada\"\n"
+        "    3. Data ou horário do pagamento\n"
+        "    4. Visual de app bancário REAL (PIX, Nubank, Itaú, Bradesco, Santander, Caixa, Inter, etc) — não logo aleatório\n"
+        "    5. Identificador (ID transação, chave PIX, código)\n"
+        "  Se TODOS OK → confirme pagamento + adicione tag [COMPROU] na resposta\n"
+        "  Se 1+ item FALTANDO → NÃO é comprovante. Vai pro caso (C)\n\n"
+        "(B) FOTO QUALQUER (selfie, meme, screenshot aleatório, print de outra coisa):\n"
+        "  Comente brevemente como humano normal + retoma assunto da venda.\n"
+        "  NÃO mande [COMPROU]. NÃO libere produto.\n\n"
+        "(C) IMAGEM AMBÍGUA ou comprovante INCOMPLETO/SUSPEITO:\n"
+        "  Pede educadamente uma nova foto MOSTRANDO especificamente o que faltou\n"
+        "  (valor / status concluído / data). NÃO mande [COMPROU].\n"
+        "  Varie o jeito de pedir — não repita a mesma frase de pedido anterior.\n\n"
+        "═══ REGRAS ANTI-FRAUDE ═══\n"
+        "- Comprovante deve ser do MESMO valor do plano cotado (se R$40 foi acordado, valor R$10 = suspeito)\n"
+        "- Data MUITO antiga (>7 dias) = suspeito, peça comprovante recente\n"
+        "- Print de email/SMS sem app bancário = não vale, peça print do app\n"
+        "- Boleto NÃO PAGO (status \"aguardando\") = NÃO é pagamento\n"
+        "- NUNCA libere acesso baseado em \"vou pagar\" ou foto sem status concluído\n"
     ),
     "audio": "O cliente enviou um ÁUDIO. Transcreva mentalmente o que ele disse e responda normalmente.",
     "video": "O cliente enviou um VÍDEO. Descreva o que acontece e responda.",
