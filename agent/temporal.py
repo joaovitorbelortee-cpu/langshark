@@ -50,6 +50,74 @@ _DAY_KEYWORDS: dict[str, int | str] = {
     "final de semana": "weekend",
 }
 
+# Padrões de TEMPO RELATIVO ("daqui X min", "em Y horas") — alta prioridade.
+# Tentado ANTES dos absolutos porque "me chama em 17h" é absoluto e "em 5 min"
+# é relativo — distintos pelo sufixo.
+_RELATIVE_PATTERNS = [
+    # "em 3 min", "daqui 5 minutos", "daq 10 mins"
+    re.compile(
+        r"\b(?:em|daqui(?:\s+a)?|d(?:e)?\s*aqui|daq)\s+(\d{1,4})\s*(?:m|min|mins|minuto|minutos)\b",
+        re.IGNORECASE,
+    ),
+    # "em 1h", "daqui 2 horas"
+    re.compile(
+        r"\b(?:em|daqui(?:\s+a)?|d(?:e)?\s*aqui|daq)\s+(\d{1,3})\s*(?:h|hora|horas|hs)\b",
+        re.IGNORECASE,
+    ),
+    # "em meia hora", "em uma hora"
+    re.compile(
+        r"\b(?:em|daqui(?:\s+a)?)\s+(meia|uma|um|dois|duas|tres|tres|cinco|dez)\s+(hora|horas|minuto|minutos)\b",
+        re.IGNORECASE,
+    ),
+]
+
+
+# Mapeamento texto→número pra padrão extenso ("meia hora", "uma hora")
+_WORD_TO_NUMBER: dict[str, float] = {
+    "meia": 0.5, "uma": 1, "um": 1,
+    "dois": 2, "duas": 2,
+    "tres": 3, "três": 3,
+    "cinco": 5, "dez": 10,
+}
+
+
+def _resolve_relative_time(text: str) -> int | None:
+    """Devolve minutos a partir de agora se mensagem tem tempo RELATIVO.
+    None = não tem.
+
+    Exemplos:
+      "me chama em 3 min" → 3
+      "daqui 1 hora"      → 60
+      "em meia hora"      → 30
+    """
+    # 1) "em N min" / "daqui N min"
+    m = _RELATIVE_PATTERNS[0].search(text)
+    if m:
+        try:
+            return max(1, int(m.group(1)))
+        except (ValueError, TypeError):
+            pass
+    # 2) "em N h" / "daqui N horas"
+    m = _RELATIVE_PATTERNS[1].search(text)
+    if m:
+        try:
+            return max(1, int(m.group(1)) * 60)
+        except (ValueError, TypeError):
+            pass
+    # 3) "em meia/uma/etc hora"
+    m = _RELATIVE_PATTERNS[2].search(text)
+    if m:
+        word = (m.group(1) or "").lower()
+        unit = (m.group(2) or "").lower()
+        n = _WORD_TO_NUMBER.get(word)
+        if n is not None:
+            if unit.startswith("hora"):
+                return max(1, int(n * 60))
+            if unit.startswith("minuto"):
+                return max(1, int(n))
+    return None
+
+
 # Padrões de horário em PT-BR. Ordem importa — tenta cada um até match.
 # Cada padrão exige um MARCADOR explícito além do número (h/horas/às/período)
 # pra não capturar "5 jogos" ou "tenho 25 anos" como horário.
@@ -147,8 +215,8 @@ def _resolve_hour(text: str) -> tuple[int | None, int]:
 
 def extract_scheduled_time(text: str) -> datetime | None:
     """
-    Devolve datetime timezone-aware Brasília se texto mencionar horário absoluto.
-    None se nenhum horário detectado.
+    Devolve datetime timezone-aware Brasília se texto mencionar horário absoluto
+    OU relativo. None se nenhum horário detectado.
 
     Exemplos:
       "chego 17h"           → hoje 17:00 (ou amanhã se já passou)
@@ -156,10 +224,18 @@ def extract_scheduled_time(text: str) -> datetime | None:
       "fim de semana"       → próximo sábado 10:00
       "às 8 da noite"       → hoje 20:00 (ou amanhã)
       "depois do trabalho"  → hoje 19:00 (ou amanhã)
+      "me chama em 3 min"   → agora + 3 min  ← NEW
+      "daqui 1 hora"        → agora + 60 min ← NEW
+      "em meia hora"        → agora + 30 min ← NEW
       "olá tudo bem"        → None
     """
     if not text:
         return None
+
+    # 1ª prioridade: tempo RELATIVO ("em 3 min", "daqui 1 hora")
+    rel_minutes = _resolve_relative_time(text)
+    if rel_minutes is not None:
+        return now_br() + timedelta(minutes=rel_minutes)
 
     text_low = text.lower()
     now = now_br()
@@ -186,7 +262,8 @@ def extract_scheduled_time(text: str) -> datetime | None:
 
 
 def datetime_to_minutes_from_now(target: datetime) -> int:
-    """Converte datetime alvo em delay-minutos. Clamp [5, 10080]."""
+    """Converte datetime alvo em delay-minutos. Clamp [1, 10080].
+    Min 1 pra suportar "me chama em 3 min" — QStash suporta delay segundos."""
     diff = target - now_br()
     minutes = int(diff.total_seconds() / 60)
-    return max(5, min(10080, minutes))
+    return max(1, min(10080, minutes))

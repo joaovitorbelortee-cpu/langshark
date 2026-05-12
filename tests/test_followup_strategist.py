@@ -60,6 +60,74 @@ def test_temporal_extracts_specific_weekday():
     assert dt.weekday() == 0  # segunda
 
 
+# ────────────────────────────────────────────────────────────────────
+# Tempo RELATIVO — "em 3 min", "daqui 1 hora", "em meia hora"
+# ────────────────────────────────────────────────────────────────────
+
+def test_temporal_extracts_relative_minutes():
+    """'em 3 min' → +3 minutos a partir de agora."""
+    from agent.temporal import extract_scheduled_time, now_br
+    dt = extract_scheduled_time("me chama em 3 min")
+    assert dt is not None
+    diff = (dt - now_br()).total_seconds() / 60
+    assert 2 <= diff <= 4, f"esperava ~3 min, got {diff:.1f}"
+
+
+def test_temporal_extracts_relative_minutes_daqui():
+    """'daqui 5 minutos' → +5 minutos."""
+    from agent.temporal import extract_scheduled_time, now_br
+    dt = extract_scheduled_time("daqui 5 minutos te falo")
+    assert dt is not None
+    diff = (dt - now_br()).total_seconds() / 60
+    assert 4 <= diff <= 6
+
+
+def test_temporal_extracts_relative_minutes_daq():
+    """'daq 10 mins' (abreviação)."""
+    from agent.temporal import extract_scheduled_time, now_br
+    dt = extract_scheduled_time("me chama daq 10 mins")
+    assert dt is not None
+    diff = (dt - now_br()).total_seconds() / 60
+    assert 9 <= diff <= 11
+
+
+def test_temporal_extracts_relative_hours():
+    """'em 1 hora' / 'daqui 2 horas'."""
+    from agent.temporal import extract_scheduled_time, now_br
+    dt = extract_scheduled_time("em 1 hora te chamo")
+    assert dt is not None
+    diff = (dt - now_br()).total_seconds() / 60
+    assert 59 <= diff <= 61
+
+    dt2 = extract_scheduled_time("daqui 2 horas")
+    assert dt2 is not None
+    diff2 = (dt2 - now_br()).total_seconds() / 60
+    assert 119 <= diff2 <= 121
+
+
+def test_temporal_extracts_relative_word_minutes():
+    """'em meia hora' → 30 min."""
+    from agent.temporal import extract_scheduled_time, now_br
+    dt = extract_scheduled_time("em meia hora te falo")
+    assert dt is not None
+    diff = (dt - now_br()).total_seconds() / 60
+    assert 29 <= diff <= 31
+
+
+def test_temporal_relative_no_match():
+    """Mensagem sem indicador relativo retorna None ou outra extração."""
+    from agent.temporal import extract_scheduled_time
+    # "5 jogos" não deve ser detectado como tempo relativo
+    dt = extract_scheduled_time("tenho 5 jogos no game pass")
+    # Pode retornar None OU detectar "5h" como hora absoluta — nenhum dos dois
+    # é problema desde que não vire "em 5 minutos"
+    if dt is not None:
+        # Se detectou, NÃO pode ser ~5 min do agora (seria bug)
+        from agent.temporal import now_br
+        diff_min = (dt - now_br()).total_seconds() / 60
+        assert diff_min > 60 or diff_min < 0, "5 jogos virou 5 min — bug"
+
+
 def test_temporal_combines_day_and_hour():
     """'amanhã às 14h' → amanhã 14:00."""
     from agent.temporal import extract_scheduled_time, now_br
@@ -100,10 +168,10 @@ def test_minutes_calc():
 
 
 def test_minutes_clamps_low():
-    """Hora muito próxima é clamped pro mínimo (5 min)."""
+    """Hora muito próxima é clamped pro mínimo (1 min — suporta 'em 3 min')."""
     from agent.temporal import datetime_to_minutes_from_now, now_br
     target = now_br() + timedelta(seconds=10)
-    assert datetime_to_minutes_from_now(target) == 5
+    assert datetime_to_minutes_from_now(target) == 1
 
 
 def test_minutes_clamps_high():

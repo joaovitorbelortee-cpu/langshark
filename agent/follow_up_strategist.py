@@ -286,6 +286,13 @@ def _validate_decision(
     except (TypeError, ValueError):
         minutos = 0
 
+    # Se regex detectou tempo (relativo OU absoluto) e LLM esqueceu SCHEDULED,
+    # FORCE pra SCHEDULED — regex tem precedência sobre adivinhação do LLM.
+    # Caso clássico: lead diz "me chama em 3 min" → regex pega 3min → mas LLM
+    # pode classificar HOT (clamp 15-60) ignorando intenção explícita.
+    if regex_dt and temp != "SCHEDULED":
+        temp = "SCHEDULED"
+
     # SCHEDULED + horario → calcula minutos do horário
     if temp == "SCHEDULED" and horario:
         try:
@@ -321,8 +328,8 @@ def _validate_decision(
         minutos = max(720, min(1440, minutos or 1080))
     elif temp == "STOP":
         minutos = 0
-    else:  # SCHEDULED
-        minutos = max(5, min(10080, minutos))
+    else:  # SCHEDULED — respeita regex/LLM, min 1 pra "me chama em 3 min"
+        minutos = max(1, min(10080, minutos))
 
     killswitch = bool(raw.get("killswitch_permanent")) or temp == "STOP"
 
