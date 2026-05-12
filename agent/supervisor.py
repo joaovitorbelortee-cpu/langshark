@@ -256,6 +256,66 @@ def _check_repetition(proposed: str, messages: list[BaseMessage], lookback: int 
     return None
 
 
+_PRICE_PATTERNS = [
+    re.compile(r"r\$\s*\d{1,3}", re.IGNORECASE),         # R$40, R$ 80
+    re.compile(r"\bcompartilhad[ao]\b", re.IGNORECASE),  # plano compartilhado
+    re.compile(r"\bprivad[ao]\b", re.IGNORECASE),        # plano privado
+    re.compile(r"\d+\s*(meses|mês|mes)\b", re.IGNORECASE),  # 3 meses
+    re.compile(r"\bplano de\s*\d", re.IGNORECASE),       # "plano de 40"
+]
+
+
+def _check_platform_first(
+    proposed: str,
+    lead_facts: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """
+    Anti PLATAFORMA-FIRST: bot oferece preço/plano sem saber a plataforma do lead.
+
+    Trigger: reply menciona valores/planos AND lead_facts.plataforma é falsy
+    AND estagio == descoberta (ainda não descobriu plataforma).
+
+    Retorna review reject; None se OK.
+    """
+    if not proposed:
+        return None
+    facts = lead_facts or {}
+    plataforma = facts.get("plataforma")
+    estagio = (facts.get("estagio") or "").lower()
+
+    # Lead já tem plataforma conhecida → pode falar preço sem problema
+    if plataforma:
+        return None
+
+    # Bot já avançou pra fechamento (lead deve ter dado contexto) — confia
+    if estagio in ("fechamento", "pos_venda"):
+        return None
+
+    # Verifica se reply menciona preço/plano
+    matched = None
+    for pat in _PRICE_PATTERNS:
+        m = pat.search(proposed)
+        if m:
+            matched = m.group(0)
+            break
+    if not matched:
+        return None
+
+    return {
+        "approved": False,
+        "reason": f"ofereceu preço/plano ('{matched}') sem saber plataforma",
+        "feedback": (
+            "Você mencionou preço/plano antes de descobrir a plataforma do lead. "
+            "REGRA: PERGUNTE ANTES qual plataforma (PC/Console/celular/TV/xCloud) "
+            "ele joga. SÓ DEPOIS, baseado na plataforma, ofereça o plano certo:\n"
+            "  - PC ou Console → compartilhada (R$40 3 meses)\n"
+            "  - Celular/TV/xCloud/nuvem → privada (R$80)\n"
+            "REESCREVA: pergunta plataforma em tom casual, SEM listar planos ainda."
+        ),
+        "severity": "critical",
+    }
+
+
 def _check_compriou_fraud(
     proposed: str,
     messages: list[BaseMessage],
@@ -363,6 +423,12 @@ async def review_reply(
     if fraud_review:
         log.warning("[supervisor] anti-fraude COMPROU rejeitou: %s", fraud_review["reason"])
         return fraud_review
+
+    # Fail-fast: bot oferecendo PREÇO sem saber plataforma do lead (PLATAFORMA-FIRST)
+    platform_review = _check_platform_first(proposed_reply, lead_facts)
+    if platform_review:
+        log.warning("[supervisor] PLATAFORMA-FIRST rejeitou: %s", platform_review["reason"])
+        return platform_review
 
     convo = _conversation_to_text(messages)
     facts_str = json.dumps(lead_facts or {}, ensure_ascii=False, indent=2)
