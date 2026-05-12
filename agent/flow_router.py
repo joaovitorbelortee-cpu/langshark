@@ -267,6 +267,22 @@ async def route_flow(
     if not flows:
         return FlowDecision(flow_name=None, reason="sem fluxos cadastrados", confidence="high")
 
+    # Stage 0: special trigger pra fluxos de "primeiro contato/início"
+    # Descrição menciona "primeira", "primeiro", "inicio", "começo" → roda se
+    # histórico do lead está vazio/só essa msg (bot nunca falou antes).
+    bot_already_spoke = any(getattr(m, "type", "") == "ai" for m in (messages or []))
+    if not bot_already_spoke:
+        first_contact_keywords = ("primeira", "primeiro", "inicio", "início", "começo", "comeco", "1a vez", "1ª vez")
+        for flow in flows:
+            desc_norm = _normalize(getattr(flow, "description", ""))
+            if any(kw in desc_norm for kw in first_contact_keywords):
+                log.info("[flow-router] STAGE0 first-contact trigger → %s", flow.name)
+                return FlowDecision(
+                    flow_name=flow.name,
+                    reason="primeira msg + descrição indica inicio",
+                    confidence="high",
+                )
+
     # Stage 1: keyword
     kw_match = _stage1_keyword_match(user_msg, flows)
     if kw_match:

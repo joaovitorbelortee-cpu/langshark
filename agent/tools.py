@@ -180,11 +180,12 @@ def _split_smart(text: str, max_chars: int) -> list[str]:
             elif len(buf2) + 1 + len(piece) <= max_chars:
                 buf2 = f"{buf2} {piece}"
             else:
-                refined.append(buf2)
+                refined.append(buf2.rstrip(", \t").rstrip())
                 buf2 = piece
         if buf2:
-            refined.append(buf2)
-    return refined
+            refined.append(buf2.rstrip(", \t").rstrip())
+    # Pass final: strip trailing vírgulas/conectivos órfãos de todas bolhas
+    return [c.rstrip(", \t").rstrip() for c in refined if c.strip()]
 
 
 def chunk_for_whatsapp(
